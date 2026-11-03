@@ -40,3 +40,9 @@ Generated product illustrations are visual placeholders for the seed catalogue. 
 - Browser checks were performed on the actual local application at desktop width 1363px and narrow CSS viewport widths 454px and 340px (using browser zoom, not phone hardware emulation). Menu/filter open-close and product-to-cart-to-checkout navigation were exercised. No horizontal document overflow was observed in the checked pages. JS/CSS syntax checks, DOM/API fixture checks and the existing five API tests pass.
 - The original design is a raster board, not a source design with exact fonts, components and original photography. The implementation follows its appearance closely; a literal 100% pixel identity is not claimed. No payment/shipping integration is implied by this visual revision.
 - Additional generated assets: hero reconstruction based on the supplied homepage panel, and background extraction preserving the positions of all ten products in the existing atlas. The built-in image tool was used; final images are consumed directly by the frontend.
+
+## Authentication form repair
+
+The generic `.auth-form label` rule was overriding the icon-row layout, while the inner text input retained `width: 0`. Auth fields now have explicit visible labels, a scoped grid row and a full-width input. Mobile rows are 48px with 46px inputs at 16px font size; checkboxes are independently sized to 18px. Mobile `/login` and `/register` show only their selected form, with links to switch between them. Desktop retains the reference's side-by-side forms.
+
+Browser geometry checks at 1363px, 454px and 340px verified nonzero input widths, correct row/checkbox heights, and no horizontal overflow; mobile tab switching was exercised. Existing API and DOM checks pass. This update does not enable social authentication or password recovery. The repository's self-hosted deployment workflow currently triggers only on `v*` tags; no tag or release is created by this repair.
