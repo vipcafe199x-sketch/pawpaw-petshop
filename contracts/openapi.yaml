@@ -1,0 +1,275 @@
+openapi: 3.1.0
+info:
+  title: PawPaw Pet Shop API
+  version: 1.0.0
+  description: REST contract for the PawPaw storefront and administration MVP.
+servers:
+  - url: /api
+security: []
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: pawpaw_session
+    CsrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+    Product:
+      type: object
+      properties:
+        id: { type: integer }
+        slug: { type: string }
+        name: { type: string }
+        category: { type: string }
+        species: { type: string }
+        price_vnd: { type: integer }
+        stock: { type: integer }
+        sku: { type: string }
+        emoji: { type: string }
+        description: { type: string }
+    OrderRequest:
+      type: object
+      required: [items, customer]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items:
+            type: object
+            required: [productId, quantity]
+            properties:
+              productId: { type: integer }
+              quantity: { type: integer, minimum: 1, maximum: 25 }
+        customer:
+          type: object
+          required: [name, phone, address]
+          properties:
+            name: { type: string }
+            email: { type: string, format: email }
+            phone: { type: string }
+            address: { type: string }
+        coupon: { type: string }
+        paymentMethod: { type: string, enum: [cod] }
+    OrderCreated:
+      type: object
+      properties:
+        id: { type: integer }
+        order_code: { type: string }
+        subtotal_vnd: { type: integer }
+        discount_vnd: { type: integer }
+        shipping_vnd: { type: integer }
+        total_vnd: { type: integer }
+        status: { type: string }
+    BookingRequest:
+      type: object
+      required: [serviceType, petName, petSpecies, ownerName, phone, serviceDate, timeSlot]
+      properties:
+        serviceType: { type: string, enum: [grooming, vet] }
+        petName: { type: string }
+        petSpecies: { type: string }
+        ownerName: { type: string }
+        phone: { type: string }
+        serviceDate: { type: string, format: date }
+        timeSlot: { type: string }
+        note: { type: string }
+paths:
+  /health:
+    get:
+      summary: Health probe
+      responses:
+        '200': { description: Healthy }
+  /csrf:
+    get:
+      summary: Set same-site CSRF cookie and return token
+      responses:
+        '200': { description: CSRF token }
+  /products:
+    get:
+      summary: Search and filter active catalog
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: category, schema: { type: string } }
+        - { in: query, name: species, schema: { type: string } }
+        - { in: query, name: sort, schema: { type: string, enum: [popular, price-asc, price-desc, newest] } }
+      responses:
+        '200': { description: Product results }
+  /products/{slug}:
+    get:
+      summary: Product details
+      parameters:
+        - { in: path, name: slug, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Product }
+        '404': { description: Missing product }
+  /storefront/settings:
+    get:
+      summary: Public store settings used by checkout UI
+      responses:
+        '200': { description: Public store settings }
+  /auth/register:
+    post:
+      summary: Register customer account
+      security: [{ CsrfHeader: [] }]
+      responses:
+        '200': { description: Customer account and session cookie }
+        '409': { description: Email already exists }
+  /auth/login:
+    post:
+      summary: Start session
+      security: [{ CsrfHeader: [] }]
+      responses:
+        '200': { description: User and session cookie }
+        '401': { description: Invalid credentials }
+  /auth/me:
+    get:
+      summary: Current user
+      responses:
+        '200': { description: Current user or null }
+  /auth/logout:
+    post:
+      summary: Revoke session
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Logged out }
+  /orders:
+    post:
+      summary: Create COD order and reserve stock atomically
+      security: [{ CsrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderRequest' }
+      responses:
+        '200':
+          description: Order created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderCreated' }
+        '409': { description: Stock conflict }
+  /orders/lookup:
+    post:
+      summary: Find order by code and phone
+      security: [{ CsrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, phone]
+              properties:
+                code: { type: string }
+                phone: { type: string }
+      responses:
+        '200': { description: Order and item snapshots }
+        '404': { description: Order not found }
+  /account/orders:
+    get:
+      summary: Customer's own orders
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Owned orders }
+        '401': { description: Sign in required }
+  /bookings:
+    post:
+      summary: Request a service booking
+      security: [{ CsrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingRequest' }
+      responses:
+        '200': { description: Booking request created }
+        '409': { description: Time slot unavailable }
+  /faqs:
+    get:
+      summary: FAQ entries
+      responses:
+        '200': { description: FAQ list }
+  /returns:
+    post:
+      summary: Request return against order code and phone
+      security: [{ CsrfHeader: [] }]
+      responses:
+        '200': { description: Return request created }
+        '404': { description: Order not found }
+  /admin/dashboard:
+    get:
+      summary: Admin dashboard aggregates
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: KPI, low stock and recent orders }
+        '403': { description: Admin role required }
+  /admin/orders:
+    get:
+      summary: Admin order queue
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Order list }
+  /admin/products:
+    get:
+      summary: Admin product management
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Product list }
+    post:
+      summary: Create product
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Product created }
+  /admin/inventory:
+    post:
+      summary: Append inventory adjustment
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Inventory adjusted }
+  /admin/customers:
+    get:
+      summary: Customer directory
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Customer list }
+  /admin/promotions:
+    get:
+      summary: Promotion list
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Coupons }
+    post:
+      summary: Create promotion
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Coupon created }
+  /admin/appointments:
+    get:
+      summary: Admin booking queue
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Appointments }
+  /admin/reports:
+    get:
+      summary: Persisted sales report
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Monthly sales and best sellers }
+  /admin/settings:
+    get:
+      summary: Store settings
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Settings }
+    patch:
+      summary: Update store settings
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Updated settings }
