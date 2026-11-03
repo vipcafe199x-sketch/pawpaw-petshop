@@ -30,3 +30,13 @@ Generated product illustrations are visual placeholders for the seed catalogue. 
 - WebP integrity and static asset references are checked.
 - Managed preview could not start: the preview relay is unavailable. Browser layout, responsive screenshots and a pixel comparison against the boards remain unverified. No claim of a 100% pixel match is made.
 - These changes update GitHub source; they do not deploy AWS infrastructure.
+
+## Reference v2 / mobile revision
+
+- Framed ivory desktop canvas, compact navigation, matching font family served locally with its OFL license, a reconstructed panoramic hero and transparent product illustrations.
+- Home features PuppyCare, CatLove, rope toy and pink bed from the existing catalogue; no nonexistent bone-snack SKU is invented.
+- A separate mobile navigation pattern provides a menu drawer, bottom tabs and a filter drawer. Catalogues use the full available width instead of squeezing four columns alongside a permanent filter sidebar.
+- Product detail, cart and checkout use dedicated narrow layouts. Checkout includes district in the address submitted to the API. Mobile form controls use 16px text to avoid unwanted focus zoom on iOS.
+- Browser checks were performed on the actual local application at desktop width 1363px and narrow CSS viewport widths 454px and 340px (using browser zoom, not phone hardware emulation). Menu/filter open-close and product-to-cart-to-checkout navigation were exercised. No horizontal document overflow was observed in the checked pages. JS/CSS syntax checks, DOM/API fixture checks and the existing five API tests pass.
+- The original design is a raster board, not a source design with exact fonts, components and original photography. The implementation follows its appearance closely; a literal 100% pixel identity is not claimed. No payment/shipping integration is implied by this visual revision.
+- Additional generated assets: hero reconstruction based on the supplied homepage panel, and background extraction preserving the positions of all ten products in the existing atlas. The built-in image tool was used; final images are consumed directly by the frontend.
