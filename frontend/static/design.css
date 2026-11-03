@@ -133,3 +133,40 @@ body {background:radial-gradient(ellipse at 30% 0,#f9f6ef,#f1ede5);font-family:'
  .site-frame .auth-form .social-login{min-height:42px;font-size:12px}
  .site-frame .auth-form .auth-bottom,.site-frame .auth-form .auth-bottom .text-link{font-size:12px;line-height:1.6}
 }
+
+/* Audit repair: keep base form rules from changing compact choice layouts. */
+[hidden]{display:none!important}
+.site-frame .search>input{border:0;box-shadow:none;outline:0;min-width:0;width:100%;border-radius:0}
+.booking-section>label.service-choice{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:center;gap:12px;padding:8px 26px 8px 8px}
+.service-choice>section{min-width:0}
+.service-choice>input[type=radio]{width:16px;height:16px;min-height:0;padding:0;accent-color:var(--green)}
+.site-frame .form-card label.delivery-option{display:flex;align-items:center;gap:9px}
+.site-frame .form-card .delivery-option>input[type=radio]{appearance:auto;width:16px;height:16px;min-height:0;flex:0 0 16px;padding:0;margin:0;accent-color:var(--green)}
+.appointment-row>select{grid-column:2/-1;justify-self:end;max-width:100%;min-height:34px}
+.catalog-products>[data-filter-empty]{grid-column:1/-1}
+@media(max-width:700px){
+ .booking-section>label.service-choice{grid-template-columns:82px minmax(0,1fr);gap:9px}
+ .booking-section>label.service-choice>.pet-photo{width:82px;height:105px;object-fit:cover}
+ .service-choice section h3{font-size:14px}
+ .service-choice section p{font-size:11px;line-height:1.5}
+ .service-choice section>b{font-size:10px}
+ .site-frame .form-card label.delivery-option{margin:0;padding:12px 0}
+}
+
+.site-frame .cart-bottom>div{grid-template-columns:1fr;align-content:start}
+.product-stage>.detail-lifestyle{object-fit:contain;background:#f4eadc}
+.account-tabs>button{border:1px solid var(--line);border-radius:20px;background:#fffdf8;color:var(--ink);font:inherit;padding:7px 12px;white-space:nowrap}
+.account-tabs>button.active{background:#def1e3;border-color:#a9d7bd;color:var(--green);font-weight:700}
+.account-order-products>span{display:flex;align-items:center;gap:8px;max-width:100%;background:#f7f6ed;border-radius:8px;padding:5px 8px}
+.account-order-products .product-photo{width:42px;height:42px;object-fit:contain;flex:0 0 42px}
+@media(max-width:700px){.account-tabs>button{min-height:38px;padding:7px 10px}.account-order-products>span{font-size:11px}}
+
+/* Grid children must shrink before their scrollable tables and tab rows. */
+.account-content,.account-content>.card,.dashboard-columns>div,.dashboard-columns>aside{min-width:0}
+.revenue-line{max-width:100%}
+@media(max-width:700px){
+ .account-content{width:100%}
+ .account-order-total{flex-wrap:wrap;gap:10px}
+ .dashboard-columns>div>.card{max-width:100%;min-width:0}
+ .recent-orders .table-scroll{width:100%;overflow-x:auto}
+}
