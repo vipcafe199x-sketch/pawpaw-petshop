@@ -1,0 +1,75 @@
+name: Publish v1.1.4
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v1.1.4.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v1.1.4
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: vipcafe199x-sketch/pawpaw-petshop
+      RELEASE_SHA: ddcfab85d2b28d2688e1627dd6d2d2e7a151e4df
+    steps:
+      - name: Publish the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.1.4 >/dev/null 2>&1; then
+            test "$(gh api repos/$GH_REPO/git/ref/tags/v1.1.4 --jq .object.sha)" = "$RELEASE_SHA"
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Thay đổi
+          - Hiện giảm giá và tổng cuối trước đặt hàng bằng API quote dùng chung phép tính với tạo đơn COD.
+          - Đồng bộ badge, ô chọn và panel trạng thái; đọc lại trạng thái máy chủ khi bị từ chối.
+          - Bỏ toàn bộ placeholder thú cưng và thống nhất checkout toàn bộ giỏ hàng.
+          - Hoàn phần tồn còn thiếu theo từng mặt hàng, không cộng lặp khi sửa đơn hủy cũ.
+          - Công cụ sửa dữ liệu theo SKU, đặt giá riêng và chỉnh trạng thái test có backup/audit.
+          - Seed chỉ trên database mới; deploy yêu cầu database hiện hữu trong volume, backup và kiểm tra catalog không đổi khi init.
+
+          ## Kiểm tra
+          16 test API và 7 test FE đạt. Chưa kiểm tra lại trực tiếp trên Safari/iPhone.
+
+          ## Dữ liệu cũ
+          Xem docs/followup-v1.1.4.md. Công cụ sửa dữ liệu mặc định chỉ xem trước và không tự chạy khi deploy. Giữ nguyên .env và volume dữ liệu. PP-010 chỉ bật bán khi có giá được xác minh.
+
+          Release được xuất bản bởi workflow này; job deploy bên dưới triển khai đúng commit đã test và kiểm tra sức khỏe.
+          NOTES
+          gh release create v1.1.4 --target "$RELEASE_SHA" --title "v1.1.4 — Báo giá, trạng thái đơn và bảo vệ dữ liệu" --notes-file release-notes.md --latest
+  deploy:
+    needs: release
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tested commit
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout --detach ddcfab85d2b28d2688e1627dd6d2d2e7a151e4df
+      - name: Protect database and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
