@@ -63,8 +63,10 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO coupons(code,discount_type,discount_value,minimum_vnd,usage_limit) VALUES('PAWPAW10','percent',10,150000,500)")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('store_name','PawPaw Pet Shop')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('free_shipping_from_vnd','299000')")
-        admin_email = os.getenv("ADMIN_EMAIL", "admin@pawpaw.local").strip().lower()
-        admin_password = os.getenv("ADMIN_PASSWORD", "ChangeMe-OnlyForLocal")
+        admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        if not admin_email or not admin_password:
+            return  # No shared/demo credentials are created when configuration is absent.
         existing = conn.execute("SELECT id FROM users WHERE email=?", (admin_email,)).fetchone()
         if not existing:
             conn.execute(

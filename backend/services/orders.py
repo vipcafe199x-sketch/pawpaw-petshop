@@ -11,6 +11,22 @@ from fastapi import HTTPException
 from backend.database import connect
 
 
+def shipping_fee(subtotal: int, free_shipping_from: int) -> int:
+    """Free shipping uses merchandise subtotal BEFORE any coupon discount."""
+    return 0 if subtotal >= free_shipping_from else 30000
+
+
+def restore_cancelled_stock(conn, order, actor_id=None) -> None:
+    """Caller holds BEGIN IMMEDIATE; the event ledger makes restoration repeat-safe."""
+    reason = f"Hủy đơn {order['order_code']}"
+    if conn.execute("SELECT 1 FROM inventory_events WHERE reason=?", (reason,)).fetchone():
+        return
+    items = conn.execute("SELECT product_id,SUM(quantity) quantity FROM order_items WHERE order_id=? AND product_id IS NOT NULL GROUP BY product_id", (order["id"],)).fetchall()
+    for item in items:
+        conn.execute("UPDATE products SET stock=stock+? WHERE id=?", (item["quantity"], item["product_id"]))
+        conn.execute("INSERT INTO inventory_events(product_id,delta,reason,actor_id) VALUES(?,?,?,?)", (item["product_id"], item["quantity"], reason, actor_id))
+
+
 def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
     items = body.get("items", [])
     customer = body.get("customer", {})
@@ -35,6 +51,8 @@ def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, 
                 row = conn.execute("SELECT id,name,price_vnd,stock FROM products WHERE id=? AND active=1", (product_id,)).fetchone()
                 if not row:
                     raise HTTPException(422, "Một sản phẩm trong giỏ không còn bán")
+                if row["price_vnd"] <= 0:
+                    raise HTTPException(422, f"Sản phẩm {row['name']} chưa có giá bán, vui lòng bỏ khỏi giỏ")
                 if row["stock"] < quantity:
                     raise HTTPException(409, f"Sản phẩm {row['name']} hiện không đủ tồn kho")
                 subtotal += row["price_vnd"] * quantity
@@ -49,7 +67,7 @@ def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, 
                 discount = min(subtotal, subtotal * coupon["discount_value"] // 100 if coupon["discount_type"] == "percent" else coupon["discount_value"])
             threshold_row = conn.execute("SELECT value FROM settings WHERE key='free_shipping_from_vnd'").fetchone()
             free_shipping_from = int(threshold_row["value"]) if threshold_row else 299000
-            shipping = 0 if subtotal - discount >= free_shipping_from else 30000
+            shipping = shipping_fee(subtotal, free_shipping_from)
             total = subtotal - discount + shipping
             payment = str(body.get("paymentMethod", "cod"))
             if payment != "cod":

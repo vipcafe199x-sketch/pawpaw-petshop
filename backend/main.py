@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.database import connect, init_db
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
-from backend.services.orders import place_order
+from backend.services.orders import place_order, restore_cancelled_stock
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "frontend" / "static"
@@ -47,7 +47,7 @@ def startup() -> None:
             raise RuntimeError("APP_SECRET must be a random value at least 40 characters long in production")
         if len(os.getenv("ADMIN_PASSWORD", "")) < 14:
             raise RuntimeError("Set a strong ADMIN_PASSWORD before starting in production")
-        if os.getenv("ADMIN_PASSWORD", "") == "ChangeMe-OnlyForLocal" or os.getenv("ADMIN_EMAIL", "").lower() == "admin@pawpaw.local":
+        if os.getenv("ADMIN_PASSWORD", "").lower().startswith("changeme") or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", os.getenv("ADMIN_EMAIL", "")) or os.getenv("ADMIN_EMAIL", "").lower().endswith(".local"):
             raise RuntimeError("Replace the local demo admin account before starting in production")
     init_db()
 
@@ -313,8 +313,8 @@ def faqs() -> list[dict[str, str]]:
 @app.get("/api/admin/dashboard")
 def admin_dashboard(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     with connect() as conn:
-        totals = conn.execute("""SELECT COUNT(*) order_count, COALESCE(SUM(total_vnd),0) revenue,
-                                 SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending_count FROM orders""").fetchone()
+        totals = conn.execute("""SELECT COUNT(*) order_count, COALESCE(SUM(CASE WHEN status!='cancelled' THEN total_vnd ELSE 0 END),0) revenue,
+                                 COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) pending_count FROM orders""").fetchone()
         customers = conn.execute("SELECT COUNT(*) c FROM users WHERE role='customer'").fetchone()["c"]
         low = conn.execute("SELECT id,name,stock,emoji FROM products WHERE active=1 AND stock<=12 ORDER BY stock ASC LIMIT 5").fetchall()
         latest = conn.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 5").fetchall()
@@ -346,15 +346,23 @@ async def update_order(order_id: int, request: Request, admin: dict[str, Any] = 
     if status not in allowed:
         raise HTTPException(422, "Trạng thái đơn không hợp lệ")
     with connect() as conn:
-        row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Không tìm thấy đơn")
-        transitions = {"pending": {"confirmed", "cancelled"}, "confirmed": {"preparing", "cancelled"}, "preparing": {"shipping", "cancelled"}, "shipping": {"delivered"}, "delivered": set(), "cancelled": set()}
-        if status != row["status"] and status not in transitions[row["status"]]:
-            raise HTTPException(409, "Không thể chuyển đơn sang trạng thái này")
-        conn.execute("UPDATE orders SET status=?,tracking_code=COALESCE(NULLIF(?,''),tracking_code) WHERE id=?", (status, str(body.get("trackingCode", "")), order_id))
-        updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-    return dict(updated)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Không tìm thấy đơn")
+            transitions = {"pending": {"confirmed", "cancelled"}, "confirmed": {"preparing", "cancelled"}, "preparing": {"shipping", "cancelled"}, "shipping": {"delivered"}, "delivered": set(), "cancelled": set()}
+            if status != row["status"] and status not in transitions[row["status"]]:
+                raise HTTPException(409, "Không thể chuyển đơn sang trạng thái này")
+            if status == "cancelled" and row["status"] != "cancelled":
+                restore_cancelled_stock(conn, row, admin["id"])
+            conn.execute("UPDATE orders SET status=?,tracking_code=COALESCE(NULLIF(?,''),tracking_code) WHERE id=?", (status, str(body.get("trackingCode", "")), order_id))
+            updated = order_view(conn, conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone())
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return updated
 
 
 @app.get("/api/admin/products")
@@ -363,22 +371,30 @@ def admin_products(admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str
         return [dict(r) for r in conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()]
 
 
+def product_integer(value: Any, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)) or not re.fullmatch(r"[0-9]+", str(value).strip()):
+        raise HTTPException(422, "Giá và tồn kho cần là số nguyên, không được để trống")
+    number = int(value)
+    if number < minimum or number > 2_147_483_647:
+        raise HTTPException(422, "Giá bán phải lớn hơn 0; tồn kho và giá so sánh không được âm")
+    return number
+
+
 @app.post("/api/admin/products")
 async def create_product(request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     require_csrf(request)
     body = await request.json()
     name = str(body.get("name", "")).strip()
     slug = re.sub(r"[^a-z0-9]+", "-", str(body.get("slug", name)).lower()).strip("-")
-    try:
-        price = int(body.get("price_vnd", 0)); stock = int(body.get("stock", 0))
-    except (TypeError, ValueError):
-        raise HTTPException(422, "Giá và tồn kho cần là số nguyên")
-    if len(name) < 3 or not slug or price < 0 or stock < 0:
+    price = product_integer(body.get("price_vnd"), minimum=1)
+    stock = product_integer(body.get("stock", 0))
+    compare = product_integer(body.get("compare_price_vnd", 0))
+    if len(name) < 3 or not slug:
         raise HTTPException(422, "Thông tin sản phẩm chưa hợp lệ")
     sku = str(body.get("sku", "")).strip() or "PP-" + secrets.token_hex(3).upper()
     with connect() as conn:
         try:
-            cur = conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,compare_price_vnd,stock,sku,emoji,description,featured) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (slug,name,str(body.get("category","Phụ kiện")),str(body.get("species","Chó")),price,int(body.get("compare_price_vnd",0)),stock,sku,str(body.get("emoji","🐾")),str(body.get("description","")),int(bool(body.get("featured")))))
+            cur = conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,compare_price_vnd,stock,sku,emoji,description,featured) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (slug,name,str(body.get("category","Phụ kiện")),str(body.get("species","Chó")),price,compare,stock,sku,str(body.get("emoji","🐾")),str(body.get("description","")),int(bool(body.get("featured")))))
         except Exception as exc:
             if "UNIQUE constraint failed" in str(exc): raise HTTPException(409, "Slug hoặc SKU đã tồn tại")
             raise
@@ -390,17 +406,12 @@ async def update_product(product_id: int, request: Request, admin: dict[str, Any
     require_csrf(request)
     body = await request.json()
     fields = {"name": "name", "category": "category", "species": "species", "price_vnd": "price_vnd", "compare_price_vnd": "compare_price_vnd", "stock": "stock", "description": "description", "active": "active", "featured": "featured", "emoji": "emoji"}
+    for key in ("price_vnd", "compare_price_vnd", "stock"):
+        if key in body:
+            body[key] = product_integer(body[key], minimum=1 if key == "price_vnd" else 0)
     updates = [(db, body[key]) for key, db in fields.items() if key in body]
     if not updates:
         raise HTTPException(422, "Không có nội dung cần cập nhật")
-    for key in ("price_vnd", "compare_price_vnd", "stock"):
-        if key in body:
-            try:
-                body[key] = int(body[key])
-            except (TypeError, ValueError):
-                raise HTTPException(422, "Giá và tồn kho cần là số nguyên")
-            if body[key] < 0:
-                raise HTTPException(422, "Giá và tồn kho không được âm")
     with connect() as conn:
         if not conn.execute("SELECT id FROM products WHERE id=?", (product_id,)).fetchone(): raise HTTPException(404, "Không tìm thấy sản phẩm")
         conn.execute("UPDATE products SET " + ",".join(f"{name}=?" for name,_ in updates) + " WHERE id=?", [v for _,v in updates] + [product_id])
@@ -476,8 +487,8 @@ async def update_appointment(appointment_id: int, request: Request, admin: dict[
 @app.get("/api/admin/reports")
 def admin_reports(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     with connect() as conn:
-        month = conn.execute("SELECT substr(created_at,1,7) month,COUNT(*) orders,COALESCE(SUM(total_vnd),0) revenue FROM orders GROUP BY month ORDER BY month DESC LIMIT 12").fetchall()
-        best = conn.execute("SELECT product_name,SUM(quantity) units,SUM(unit_price_vnd*quantity) revenue FROM order_items GROUP BY product_name ORDER BY units DESC LIMIT 8").fetchall()
+        month = conn.execute("SELECT substr(created_at,1,7) month,COUNT(*) orders,COALESCE(SUM(total_vnd),0) revenue FROM orders WHERE status!='cancelled' GROUP BY month ORDER BY month DESC LIMIT 12").fetchall()
+        best = conn.execute("SELECT i.product_name,SUM(i.quantity) units,SUM(i.unit_price_vnd*i.quantity) revenue FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.status!='cancelled' GROUP BY i.product_name ORDER BY units DESC LIMIT 8").fetchall()
         returns_count = conn.execute("SELECT COUNT(*) c FROM returns").fetchone()["c"]
     return {"months": [dict(r) for r in reversed(month)], "best_sellers": [dict(r) for r in best], "returns_count": returns_count}
 
