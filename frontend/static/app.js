@@ -117,4 +117,3 @@ document.addEventListener("submit",async e=>{
 });
 document.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.id==="search-box"){e.preventDefault();document.querySelector('[data-action="search"]')?.click()}});
 function downloadCSV(rows,name){if(!rows.length){toast("Chưa có dữ liệu để xuất");return}const keys=Object.keys(rows[0]);const csv=[keys.join(","),...rows.map(r=>keys.map(k=>'"'+String(r[k]??"").replaceAll('"','""')+'"').join(","))].join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
-init();
