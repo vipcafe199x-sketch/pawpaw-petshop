@@ -1,0 +1,27 @@
+name: Deploy to my-server
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tag on server
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout tags/${{ github.ref_name }}
+          git -C /opt/pawpaw rev-parse HEAD
+      - name: Rebuild and restart container
+        run: |
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw || true
+          docker rm pawpaw || true
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
