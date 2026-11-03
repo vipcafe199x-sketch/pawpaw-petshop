@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.database import connect, init_db
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
-from backend.services.orders import place_order, restore_cancelled_stock
+from backend.services.orders import place_order, quote_order, restore_cancelled_stock
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "frontend" / "static"
@@ -35,6 +35,8 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
     if APP_ENV == "production":
         response.headers["Strict-Transport-Security"] = "max-age=15552000; includeSubDomains"
     return response
@@ -217,6 +219,12 @@ def logout(request: Request, response: Response) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/orders/quote")
+async def checkout_quote(request: Request) -> dict[str, Any]:
+    require_csrf(request)
+    return quote_order(await request.json())
+
+
 @app.post("/api/orders")
 async def create_order(request: Request) -> dict[str, Any]:
     require_csrf(request)
@@ -335,6 +343,15 @@ def admin_orders(q: str = "", status: str = "", admin: dict[str, Any] = Depends(
             params.append(status)
         rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT 200", params).fetchall()
         return [order_view(conn, r) for r in rows]
+
+
+@app.get("/api/admin/orders/{order_id}")
+def admin_order(order_id: int, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Không tìm thấy đơn")
+        return order_view(conn, row)
 
 
 @app.patch("/api/admin/orders/{order_id}")
@@ -513,4 +530,4 @@ def web(path: str) -> FileResponse:
     # Client-side route map handles storefront and admin pages; unknown URLs land on the branded 404 view.
     if path.startswith("api/"):
         raise HTTPException(404, "API route not found")
-    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})

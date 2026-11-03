@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PawPaw Pet Shop API
-  version: 1.0.0
+  version: 1.1.4
   description: REST contract for the PawPaw storefront and administration MVP.
 servers:
   - url: /api
@@ -38,6 +38,7 @@ components:
       type: object
       required: [items, customer]
       properties:
+        expectedTotalVnd: { type: integer, description: Reviewed total; mismatches return 409 before writes }
         items:
           type: array
           minItems: 1
@@ -139,6 +140,24 @@ paths:
       security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
       responses:
         '200': { description: Logged out }
+  /orders/quote:
+    post:
+      summary: Preview coupon discount and pre-discount shipping without changing stock or coupon usage
+      security: [{ CsrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items: { $ref: '#/components/schemas/OrderRequest/properties/items' }
+                coupon: { type: string }
+      responses:
+        '200': { description: subtotal_vnd, discount_vnd, shipping_vnd, total_vnd, coupon_code and shipping_basis }
+        '409': { description: Stock conflict }
+        '422': { description: Invalid cart or coupon }
   /orders:
     post:
       summary: Create COD order and reserve stock atomically
@@ -216,6 +235,21 @@ paths:
       security: [{ SessionCookie: [] }]
       responses:
         '200': { description: Order list }
+  /admin/orders/{order_id}:
+    parameters:
+      - { name: order_id, in: path, required: true, schema: { type: integer } }
+    get:
+      summary: Authoritative order and items for status synchronization
+      security: [{ SessionCookie: [] }]
+      responses:
+        '200': { description: Current order, Cache-Control no-store }
+        '404': { description: Order not found }
+    patch:
+      summary: Advance order status; cancellation restores remaining stock transactionally
+      security: [{ SessionCookie: [] }, { CsrfHeader: [] }]
+      responses:
+        '200': { description: Updated order and items }
+        '409': { description: Transition rejected; GET this resource for current state }
   /admin/products:
     get:
       summary: Admin product management

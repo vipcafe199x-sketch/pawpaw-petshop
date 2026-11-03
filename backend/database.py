@@ -40,6 +40,8 @@ def db_path() -> Path:
 
 def connect() -> sqlite3.Connection:
     path = db_path()
+    if os.getenv("APP_ENV") == "production" and not path.is_file() and os.getenv("ALLOW_DATABASE_INIT") != "1":
+        raise RuntimeError("Production database is missing; refusing to create or seed a new database. Check DATABASE_PATH and the data volume.")
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=15, isolation_level=None, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
@@ -49,18 +51,21 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    path = db_path()
+    fresh_database = not path.is_file() or path.stat().st_size == 0
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-        for idx, row in enumerate(DEFAULT_PRODUCTS):
-            slug, name, category, species, price, compare, stock, emoji, desc = row
-            conn.execute(
-                """INSERT OR IGNORE INTO products
-                (slug,name,category,species,price_vnd,compare_price_vnd,stock,sku,emoji,description,featured)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (slug, name, category, species, price, compare, stock, f"PP-{idx+1:03}", emoji, desc, 1 if idx < 5 else 0),
-            )
-        conn.execute("INSERT OR IGNORE INTO coupons(code,discount_type,discount_value,minimum_vnd,usage_limit) VALUES('PAWPAW10','percent',10,150000,500)")
+        if fresh_database:
+            for idx, row in enumerate(DEFAULT_PRODUCTS):
+                slug, name, category, species, price, compare, stock, emoji, desc = row
+                conn.execute(
+                    """INSERT OR IGNORE INTO products
+                    (slug,name,category,species,price_vnd,compare_price_vnd,stock,sku,emoji,description,featured)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (slug, name, category, species, price, compare, stock, f"PP-{idx+1:03}", emoji, desc, 1 if idx < 5 else 0),
+                )
+            conn.execute("INSERT OR IGNORE INTO coupons(code,discount_type,discount_value,minimum_vnd,usage_limit) VALUES('PAWPAW10','percent',10,150000,500)")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('store_name','PawPaw Pet Shop')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('free_shipping_from_vnd','299000')")
         admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()

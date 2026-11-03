@@ -185,6 +185,102 @@ class PawPawApiTests(unittest.TestCase):
         self.assertTrue(any('skipped' in action for action in again['actions']))
         self.assertEqual(self.stock(p), p['stock'])
 
+    def test_quote_matches_final_order_without_mutating_stock_or_coupon(self):
+        p = self.product()
+        self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'price_vnd': 110000})
+        self.client.patch('/api/admin/settings', headers=self.headers, json={'free_shipping_from_vnd': '299000'})
+        coupon = 'QA-' + secrets.token_hex(6)
+        with connect() as conn:
+            conn.execute("INSERT INTO coupons(code,discount_type,discount_value,minimum_vnd) VALUES(?,'percent',10,0)", (coupon,))
+            before_orders = conn.execute('SELECT COUNT(*) n FROM orders').fetchone()['n']
+        payload = {'items': [{'productId': p['id'], 'quantity': 3}], 'coupon': coupon}
+        preview = self.client.post('/api/orders/quote', headers=self.headers, json=payload)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        quote = preview.json()
+        self.assertEqual((quote['subtotal_vnd'], quote['discount_vnd'], quote['shipping_vnd'], quote['total_vnd']), (330000,33000,0,297000))
+        self.assertEqual(self.stock(p), p['stock'])
+        with connect() as conn:
+            self.assertEqual(conn.execute('SELECT used_count FROM coupons WHERE code=?', (coupon,)).fetchone()['used_count'], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) n FROM orders').fetchone()['n'], before_orders)
+        payload.update(customer={'name':'SYNTHETIC QA','phone':'0000000000','address':'TEST ADDRESS'}, expectedTotalVnd=quote['total_vnd'])
+        order = self.client.post('/api/orders', headers=self.headers, json=payload)
+        self.assertEqual(order.status_code, 200, order.text)
+        for key in ('subtotal_vnd','discount_vnd','shipping_vnd','total_vnd'):
+            self.assertEqual(order.json()[key], quote[key])
+        self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'price_vnd': 110001})
+        stale = self.client.post('/api/orders', headers=self.headers, json=payload)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(self.stock(p), p['stock']-3)
+        payload['coupon'] = 'QA-INVALID'
+        self.assertEqual(self.client.post('/api/orders/quote', headers=self.headers, json=payload).status_code, 422)
+
+    def test_init_and_deploy_guard_preserve_existing_catalog(self):
+        from backend.database import init_db, db_path
+        from backend.deployment_guard import protect_existing_database, catalog_fingerprint
+        from unittest.mock import patch
+        p = self.product()
+        with connect() as conn:
+            conn.execute('UPDATE products SET stock=3,price_vnd=0 WHERE id=?', (p['id'],))
+        before = catalog_fingerprint()
+        init_db()
+        self.assertEqual(catalog_fingerprint(), before)
+        guarded = protect_existing_database(db_path().parent)
+        self.assertTrue(guarded['backup_created'])
+        self.assertTrue(guarded['catalog_unchanged'])
+        with tempfile.TemporaryDirectory() as directory:
+            missing = str(Path(directory)/'missing.sqlite3')
+            with patch.dict(os.environ, {'APP_ENV':'production','ALLOW_DATABASE_INIT':'0','DATABASE_PATH':missing}):
+                with self.assertRaises(RuntimeError):
+                    init_db()
+                self.assertFalse(Path(missing).exists())
+
+    def test_repair_product_by_sku_and_price_only_preserves_other_stock(self):
+        p, unpriced, untouched = self.product(), self.product(), self.product()
+        with connect() as conn:
+            conn.execute("UPDATE products SET name='RENAMED QA',price_vnd=0,stock=0 WHERE id=?", (p['id'],))
+            conn.execute('UPDATE products SET price_vnd=0,active=0 WHERE id=?', (unpriced['id'],))
+        preview = repair_reported_data(product_repairs={p['sku']:(p['price_vnd'],p['stock'])}, price_repairs={unpriced['sku']:unpriced['price_vnd']})
+        self.assertFalse(preview['applied'])
+        self.assertEqual(self.stock(p), 0)
+        repair_reported_data(True, product_repairs={p['sku']:(p['price_vnd'],p['stock'])}, price_repairs={unpriced['sku']:unpriced['price_vnd']})
+        self.assertEqual(self.stock(p), p['stock'])
+        restored = self.client.get('/api/products/'+p['slug']).json()
+        self.assertEqual(restored['price_vnd'],p['price_vnd'])
+        self.assertEqual(self.stock(unpriced),unpriced['stock'])
+        self.assertEqual(self.stock(untouched),untouched['stock'])
+        repair_reported_data(True, product_repairs={p['sku']:(p['price_vnd']+1,999)})
+        self.assertEqual(self.stock(p),p['stock'])
+
+    def test_partial_legacy_cancel_restores_each_product_only_once(self):
+        a, b = self.product(), self.product()
+        response = self.client.post('/api/orders', headers=self.headers, json={'items':[{'productId':a['id'],'quantity':2},{'productId':b['id'],'quantity':2}], 'customer':{'name':'SYNTHETIC QA','phone':'0000000000','address':'TEST ADDRESS'}})
+        self.assertEqual(response.status_code,200,response.text)
+        order = response.json()
+        with connect() as conn:
+            conn.execute("UPDATE orders SET status='cancelled' WHERE id=?",(order['id'],))
+            conn.execute('UPDATE products SET stock=stock+1 WHERE id=?',(a['id'],))
+            conn.execute('INSERT INTO inventory_events(product_id,delta,reason) VALUES(?,?,?)',(a['id'],1,'Hủy đơn '+order['order_code']))
+        for _ in range(2):
+            repair_reported_data(True,cancelled_codes=[order['order_code']])
+            self.assertEqual(self.stock(a),a['stock'])
+            self.assertEqual(self.stock(b),b['stock'])
+
+    def test_status_rejection_readback_and_audited_manual_rewind(self):
+        p = self.product();order = self.order(p).json()
+        for status in ['confirmed','preparing']:
+            self.assertEqual(self.client.patch(f"/api/admin/orders/{order['id']}",headers=self.headers,json={'status':status}).status_code,200)
+        rejected = self.client.patch(f"/api/admin/orders/{order['id']}",headers=self.headers,json={'status':'confirmed'})
+        self.assertEqual(rejected.status_code,409)
+        self.assertEqual(self.client.get(f"/api/admin/orders/{order['id']}").json()['status'],'preparing')
+        stock = self.stock(p)
+        repair_reported_data(rewind_codes=[order['order_code']])
+        self.assertEqual(self.client.get(f"/api/admin/orders/{order['id']}").json()['status'],'preparing')
+        repair_reported_data(True,rewind_codes=[order['order_code']])
+        self.assertEqual(self.client.get(f"/api/admin/orders/{order['id']}").json()['status'],'confirmed')
+        self.assertEqual(self.stock(p),stock)
+        with connect() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) n FROM operational_adjustments WHERE subject_id=?',(str(order['id']),)).fetchone()['n'],1)
+
 
 if __name__ == '__main__':
     unittest.main()

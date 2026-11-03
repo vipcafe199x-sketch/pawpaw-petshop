@@ -56,3 +56,7 @@ Công cụ dữ liệu mặc định chỉ xem trước, không chạy khi khở
 ```bash
 python -m backend.repair_reported_data
 ```
+
+## v1.1.4 follow-up
+
+Xem [hướng dẫn kiểm tra, bảo vệ database và sửa dữ liệu cũ](docs/followup-v1.1.4.md). Báo giá coupon trước đặt hàng dùng `/api/orders/quote` và cùng phép tính với tạo đơn. Deploy hiện yêu cầu database đang tồn tại trong volume, sao lưu rồi kiểm tra khởi tạo không đổi catalog.

@@ -17,8 +17,12 @@ jobs:
       - name: Rebuild and restart container
         run: |
           docker build -t pawpaw-petshop /opt/pawpaw
-          docker stop pawpaw || true
-          docker rm pawpaw || true
+          set -euo pipefail
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
           docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
       - name: Verify health
         run: |

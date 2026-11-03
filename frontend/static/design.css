@@ -185,3 +185,5 @@ body {background:radial-gradient(ellipse at 30% 0,#f9f6ef,#f1ede5);font-family:'
 .editor-help,.shipping-policy{font-size:11px;line-height:1.6;color:#52675f}
 .editor-error{color:#b62735;font-size:13px}
 @media(max-width:480px){#product-editor{padding:16px}.editor-grid{grid-template-columns:1fr;gap:0}.product-editor-form input:not([type=checkbox]){font-size:16px}}
+
+.site-frame .summary>[data-order-pricing]{display:block}.order-pricing>div{display:flex;justify-content:space-between;gap:10px;margin:12px 0;font-size:12px}.summary .quote-message{font-size:12px;line-height:1.5}.is-disabled{opacity:.5;cursor:not-allowed}.checkout-summary .coupon{padding:5px 0 12px}.checkout-summary .coupon input{width:100%;min-width:0}.checkout-summary .coupon .btn{margin:0}
