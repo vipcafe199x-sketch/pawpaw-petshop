@@ -47,6 +47,7 @@ def calculate_quote(conn, items, coupon_code=''):
         clean.append((product_id, quantity, dict(row)))
     coupon_code = str(coupon_code).strip().upper()
     discount = 0
+    coupon_terms = None
     if coupon_code:
         coupon = conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE AND active=1', (coupon_code,)).fetchone()
         coupon = coupon_view(coupon) if coupon else None
@@ -54,12 +55,13 @@ def calculate_quote(conn, items, coupon_code=''):
         expired = bool(coupon and coupon['expires_at'] and str(coupon['expires_at']) < datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date().isoformat())
         if not coupon or not_started or expired or (coupon['usage_limit'] and coupon['used_count'] >= coupon['usage_limit']) or subtotal < coupon['minimum_vnd']:
             raise HTTPException(422, 'Mã ưu đãi không hợp lệ hoặc chưa đủ điều kiện')
+        coupon_terms = {key:coupon[key] for key in ('discount_type','discount_value','minimum_vnd')}
         discount = min(subtotal, subtotal * coupon['discount_value'] // 100 if coupon['discount_type'] == 'percent' else coupon['discount_value'])
     threshold = conn.execute("SELECT value FROM settings WHERE key='free_shipping_from_vnd'").fetchone()
     shipping = shipping_fee(subtotal, int(threshold['value']) if threshold else 299000)
     return clean, {'subtotal_vnd': subtotal, 'discount_vnd': discount, 'shipping_vnd': shipping,
                    'total_vnd': subtotal - discount + shipping, 'coupon_code': coupon_code,
-                   'shipping_basis': 'subtotal_before_discount'}
+                   'shipping_basis': 'subtotal_before_discount', 'coupon_terms':coupon_terms}
 
 
 def quote_order(body):

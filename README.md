@@ -76,3 +76,7 @@ Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an to
 ## v1.2.3 quản lý sản phẩm
 
 [Xóa sản phẩm có xác nhận, chặn liên kết đơn hàng và tự làm mới phiên biểu mẫu](docs/followup-v1.2.3.md). Chưa tự dọn PP-TEST-001/ABC; thử nghiệm tạo/sửa/xóa chỉ chạy trên QA.
+
+## v1.2.4 giỏ hàng và bộ lọc
+
+[Đối chiếu PAWPAW10 10%, điều kiện lấy từ báo giá server và đếm đúng sản phẩm sau lọc](docs/followup-v1.2.4.md).

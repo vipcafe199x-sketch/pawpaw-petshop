@@ -627,5 +627,31 @@ class PawPawApiTests(unittest.TestCase):
         r=self.client.post('/api/admin/uploads',headers={**self.headers,'Content-Type':'image/png'},content=data.getvalue())
         self.assertEqual(r.status_code,200);self.assertEqual(len(set(UPLOAD_DIR.glob('*.webp'))-before),1)
 
+
+    def test_coupon_ten_percent_quote_and_order_match_with_server_terms(self):
+        p=self.product();code='QA-'+secrets.token_hex(6).upper()
+        self.client.patch(f"/api/admin/products/{p['id']}",headers=self.headers,json={'price_vnd':320000})
+        self.client.patch('/api/admin/settings',headers=self.headers,json={'free_shipping_from_vnd':299000})
+        body={'code':code,'discount_type':'percent','discount_value':10,'minimum_vnd':150000,'usage_limit':7,'active':1}
+        self.assertEqual(self.client.post('/api/admin/promotions',headers=self.headers,json=body).status_code,200)
+        request={'items':[{'productId':p['id'],'quantity':1}],'coupon':code}
+        before=self.stock(p)
+        quote=self.client.post('/api/orders/quote',headers=self.headers,json=request).json()
+        self.assertEqual((quote['subtotal_vnd'],quote['discount_vnd'],quote['shipping_vnd'],quote['total_vnd']),(320000,32000,0,288000))
+        self.assertEqual(quote['coupon_terms'],{'discount_type':'percent','discount_value':10,'minimum_vnd':150000})
+        self.assertEqual(self.stock(p),before)
+        order=self.order(p,coupon=code).json()
+        for key in ('subtotal_vnd','discount_vnd','shipping_vnd','total_vnd','coupon_terms'): self.assertEqual(order[key],quote[key])
+        self.assertEqual(self.client.patch('/api/admin/promotions/'+code,headers=self.headers,json={'discount_value':30}).status_code,200)
+        changed=self.client.post('/api/orders/quote',headers=self.headers,json=request).json()
+        self.assertEqual((changed['discount_vnd'],changed['total_vnd']),(96000,224000));self.assertEqual(changed['coupon_terms']['discount_value'],30)
+        original=self.client.get('/api/admin/orders/'+str(order['id'])).json()
+        self.assertEqual(original['total_vnd'],288000)
+        self.client.patch('/api/admin/promotions/'+code,headers=self.headers,json={'discount_type':'fixed','discount_value':1000})
+        fixed=self.client.post('/api/orders/quote',headers=self.headers,json=request).json()
+        self.assertEqual(fixed['discount_vnd'],1000);self.assertEqual(fixed['coupon_terms']['discount_type'],'fixed')
+        request['coupon']=''
+        self.assertIsNone(self.client.post('/api/orders/quote',headers=self.headers,json=request).json()['coupon_terms'])
+
 if __name__ == '__main__':
     unittest.main()

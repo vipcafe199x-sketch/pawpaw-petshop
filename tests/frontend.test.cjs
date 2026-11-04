@@ -16,7 +16,7 @@ function harness(){
  const promo={code:'QA10',discount_type:'percent',discount_value:10,minimum_vnd:0,usage_limit:10,active:1,used_count:0,starts_at:'',expires_at:''};
  const customer={id:9,full_name:'TEST CUSTOMER',email:'qa@example.invalid',phone:'0000000000',spent_vnd:0,order_count:0,tier:'Thành viên mới',orders:[order],archived:0};
  const settings={store_name:'QA',low_stock_threshold:5};
- const switches={publicFilter:false,rejectStatus:false,quoteError:false,csrfFailures:0,csrfRefreshError:false,mutationFailure:0,deleteRejected:false};const writes=[],calls=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
+ const switches={publicFilter:false,rejectStatus:false,quoteError:false,quoteOverride:null,csrfFailures:0,csrfRefreshError:false,mutationFailure:0,deleteRejected:false};const writes=[],calls=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
  let location=new URL('https://qa.test/admin/products');
  const context={window,document,console,Intl,Date,URL,URLSearchParams,Set,Map,Blob,navigator:{},localStorage:storage(),sessionStorage:storage(),setTimeout:()=>1,clearTimeout:()=>{},get location(){return location},history:{pushState:(_,__,url)=>{location=new URL(url,location)}},FormData:class{},fetch:async(url,options={})=>{
   calls.push({url,method:options.method||'GET',headers:options.headers||{},body:options.body});
@@ -25,7 +25,7 @@ function harness(){
   let data;if(url==='/api/csrf'){if(switches.csrfRefreshError)return {ok:false,status:503,json:async()=>({detail:'TEST REFRESH FAILED'})};data={csrfToken:'QA-FRESH-TOKEN'}}
   else if(url==='/api/admin/uploads'&&options.method==='POST'){writes.push({url,body:options.body});data={image_url:'/uploads/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp'}}
   else if(options.method==='DELETE'){if(switches.deleteRejected)return {ok:false,status:409,json:async()=>({detail:'TEST ORDER EXISTS'})};const id=Number(url.split('/').pop());writes.push({url,body:JSON.parse(options.body)});products.splice(products.findIndex(p=>p.id===id),1);data={deleted:true,id}}
-  else if(url==='/api/orders/quote'){if(switches.quoteError)return {ok:false,json:async()=>({detail:'TEST COUPON INVALID'})};data={subtotal_vnd:400000,discount_vnd:40000,shipping_vnd:0,total_vnd:360000,coupon_code:'TEST10'}}
+  else if(url==='/api/orders/quote'){if(switches.quoteError)return {ok:false,json:async()=>({detail:'TEST COUPON INVALID'})};data=switches.quoteOverride||{subtotal_vnd:400000,discount_vnd:40000,shipping_vnd:0,total_vnd:360000,coupon_code:'TEST10'}}
   else if(options.method==='POST'&&url.startsWith('/api/admin/')){writes.push({url,body:JSON.parse(options.body)});data={ok:true}}
   else if(options.method==='PATCH'){if(url.includes('/orders/')&&switches.rejectStatus)return {ok:false,json:async()=>({detail:'TEST TRANSITION REJECTED'})};writes.push({url,body:JSON.parse(options.body)});data=url.includes('/orders/')?{...order,status:JSON.parse(options.body).status}:{...products[0],...JSON.parse(options.body)}}
   else if(url==='/api/admin/products'||url.startsWith('/api/products?')||url==='/api/products')data=switches.publicFilter&&url!=='/api/admin/products'?products.filter(p=>p.active&&p.price_vnd>0):products;
@@ -241,4 +241,25 @@ test('automatic retry is bounded and never retries auth, origin, conflict, serve
 test('concurrent requests share CSRF refresh and binary upload retries the same immutable body once',async()=>{
  const h=harness();await h.run("Promise.all([api('/api/admin/inventory',{method:'POST',body:'{}'}),api('/api/admin/inventory',{method:'POST',body:'{}'})])");assert.equal(h.calls.filter(c=>c.url==='/api/csrf').length,1);assert.equal(h.writes.length,2);
  const upload=harness();upload.run("STATE.csrf='QA-STALE'");upload.switches.csrfFailures=1;await upload.run("api('/api/admin/uploads',{method:'POST',headers:{'Content-Type':'image/png'},body:new Blob(['QA IMAGE'],{type:'image/png'})})");const attempts=upload.calls.filter(c=>c.url==='/api/admin/uploads');assert.equal(attempts.length,2);assert.equal(attempts[0].body,attempts[1].body);assert.equal(attempts[1].headers['Content-Type'],'image/png');assert.equal(upload.writes.length,1);assert.equal(upload.writes[0].body,attempts[0].body);
+});
+
+test('catalog header and footer agree after CatLove Apply, zero matches and clearing filters',async()=>{
+ const h=harness();h.switches.publicFilter=true;h.products[0].brand='CatLove';
+ for(let i=0;i<9;i++)h.products.push({...h.products[0],id:20+i,name:'QA OTHER '+i,slug:'qa-other-'+i,brand:'PuppyCare'});
+ h.navigate('/shop');await h.run('render()');assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 10 sản phẩm/);
+ const brand=h.document.querySelector('[name=brand-filter][value=CatLove]');brand.checked=true;brand.dispatchEvent(new h.window.Event('change',{bubbles:true}));
+ assert.match(h.document.querySelector('.shop-title p').textContent,/Có 1 sản phẩm phù hợp/);assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 1 sản phẩm/);
+ h.document.querySelector('[data-action=apply-filters]').click();await tick();await tick();assert.match(h.run('location.search'),/brand=CatLove/);assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 1 sản phẩm/);
+ const price=h.document.querySelector('#price-filter');price.value='1';price.dispatchEvent(new h.window.Event('input',{bubbles:true}));assert.match(h.document.querySelector('.shop-title p').textContent,/Có 0 sản phẩm phù hợp/);assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 0 sản phẩm/);assert.equal(h.document.querySelector('[data-filter-empty]').hidden,false);
+ h.document.querySelector('[data-action=clear-filters]').click();await tick();await tick();assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 10 sản phẩm/);
+ h.products.splice(0,h.products.length);await h.run('render()');assert.match(h.document.querySelector('.shop-title p').textContent,/Có 0 sản phẩm phù hợp/);assert.match(h.document.querySelector('[data-catalog-count]').textContent,/Hiển thị 0 sản phẩm/);
+});
+
+test('cart and checkout display applied coupon terms from the server, never a hardcoded rate',async()=>{
+ const h=harness();h.switches.quoteOverride={subtotal_vnd:320000,discount_vnd:32000,shipping_vnd:0,total_vnd:288000,coupon_code:'QA10',coupon_terms:{discount_type:'percent',discount_value:10,minimum_vnd:150000}};
+ h.run(`STATE.products=${JSON.stringify(h.products)};STATE.cart=[{productId:6,name:'QA',price:320000,quantity:1}]`);
+ await h.run('refreshCartQuote()');h.document.querySelector('#app').innerHTML=h.run('cart()');assert.match(h.document.querySelector('[data-coupon-terms]').textContent,/QA10 Giảm 10%/);assert.match(h.document.querySelector('[data-quote-discount]').textContent,/32\.000/);assert.match(h.document.querySelector('[data-quote-total]').textContent,/288\.000/);
+ h.switches.quoteOverride={...h.switches.quoteOverride,discount_vnd:96000,total_vnd:224000,coupon_terms:{discount_type:'percent',discount_value:30,minimum_vnd:150000}};await h.run('refreshCartQuote()');h.run('updateQuoteUI()');assert.match(h.document.querySelector('[data-coupon-terms]').textContent,/Giảm 30%/);assert.doesNotMatch(h.document.querySelector('[data-coupon-terms]').textContent,/10%/);
+ h.document.querySelector('#app').innerHTML=h.run('checkout()');assert.match(h.document.querySelector('.quote-coupon-terms').textContent,/Giảm 30%/);assert.match(h.document.querySelector('[data-quote-total]').textContent,/224\.000/);
+ h.switches.quoteOverride={...h.switches.quoteOverride,coupon_code:'',coupon_terms:null,discount_vnd:0};await h.run('refreshCartQuote()');assert.doesNotMatch(h.run('couponTermsLabel()'),/PAWPAW10|10%|30%/);
 });
