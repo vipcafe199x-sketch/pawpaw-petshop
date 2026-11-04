@@ -1,0 +1,96 @@
+name: Publish v1.2.1
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v1.2.1.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v1.2.1
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2e973ef4961c7365363268b73f58c41659fc5cb6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: npm ci
+      - run: npm test
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: vipcafe199x-sketch/pawpaw-petshop
+      RELEASE_SHA: 2e973ef4961c7365363268b73f58c41659fc5cb6
+    steps:
+      - name: Publish the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.2.1 >/dev/null 2>&1; then
+            test "$(gh api repos/$GH_REPO/git/ref/tags/v1.2.1 --jq .object.sha)" = "$RELEASE_SHA"
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Catalog, khuyến mãi và báo cáo
+          - Ẩn nháp và sản phẩm không giá khỏi API shop/tìm kiếm/chi tiết công khai.
+          - Chuẩn hóa ngày khuyến mãi cho date input; mở/Hủy không ghi; chống xóa ngày đã lưu do ô trống.
+          - Nạp liên hệ thật; liên hệ chưa cấu hình không bắt buộc, gửi trống không xóa dữ liệu cũ.
+          - Báo cáo bỏ giới hạn top 8, hiển thị tiền hàng, giảm giá, ship và chênh lệch dữ liệu lịch sử cùng mã đơn cần đối soát. Không gồm đơn hủy, không tự đổi tiền đơn.
+          - Công cụ khôi phục có --only-explicit-products và --activate-repaired; có backup và nhật ký, chạy lặp không cộng tồn.
+
+          ## Kiểm chứng và thao tác production
+          29 API/database tests + 17 DOM tests đạt, gồm suite quản trị v1.2.0 và shop công khai. CI chạy lại trước phát hành.
+          Xem docs/followup-v1.2.1.md: bốn bước có lệnh --apply ghi thật cho PP-005/006/007 và hướng dẫn xử lý ABC sau khi xác nhận.
+          Release không tự khôi phục SKU hoặc dọn ABC vì tên sản phẩm được báo chưa nhất quán. Không tạo Bánh thưởng dâu tây từ dữ liệu suy đoán.
+          Deploy bảo vệ/sao lưu catalog và chạy audit chỉ đọc; chưa test trực tiếp Safari/iPhone.
+
+          NOTES
+          gh release create v1.2.1 --target "$RELEASE_SHA" --title "v1.2.1 — Bảo vệ catalog, ngày khuyến mãi và đối soát doanh thu" --notes-file release-notes.md --latest
+  deploy:
+    needs: release
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tested commit
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout --detach 2e973ef4961c7365363268b73f58c41659fc5cb6
+      - name: Protect database and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
+          curl -fsS http://127.0.0.1:8001/ | grep -q 'data-build="v1.2.1"'
+          curl -fsS http://127.0.0.1:8001/static/admin.js?v=v1.2.1 -o /tmp/pawpaw-admin-v1.2.1.js
+          test -s /tmp/pawpaw-admin-v1.2.1.js
+      - name: Read-only production audit
+        run: docker exec pawpaw python -m backend.release_audit
