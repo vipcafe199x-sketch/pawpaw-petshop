@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 import secrets
+import hashlib
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -91,7 +93,15 @@ def restore_cancelled_stock(conn, order, actor_id=None):
     return restored_items
 
 
-def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+def place_order(body: dict[str, Any], user: dict[str, Any] | None, idempotency_key: str | None = None) -> dict[str, Any]:
+    if idempotency_key and not re.fullmatch(r'[0-9a-f]{48}', idempotency_key):
+        raise HTTPException(422, 'Mã yêu cầu đặt hàng không hợp lệ')
+    key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest() if idempotency_key else None
+    request_hash = hashlib.sha256(json.dumps({'body':body,'user':user['id'] if user else None}, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    note = body.get('note', '')
+    if not isinstance(note, str) or len(note) > 2000:
+        raise HTTPException(422, 'Ghi chú giao hàng không hợp lệ hoặc quá dài')
+    note = note.strip()
     customer = body.get('customer', {})
     if not isinstance(customer, dict) or any(not str(customer.get(k, '')).strip() for k in ('name', 'phone', 'address')):
         raise HTTPException(422, 'Vui lòng điền tên, số điện thoại và địa chỉ giao hàng')
@@ -102,14 +112,21 @@ def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, 
     with connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         try:
+            if key_hash:
+                existing = conn.execute('SELECT request_hash,response_json FROM order_idempotency WHERE key_hash=?', (key_hash,)).fetchone()
+                if existing:
+                    if existing['request_hash'] != request_hash:
+                        raise HTTPException(409, 'Mã yêu cầu đã dùng với nội dung khác')
+                    conn.execute('COMMIT')
+                    return json.loads(existing['response_json'])
             clean_items, quote = calculate_quote(conn, body.get('items'), body.get('coupon', ''))
             if 'expectedTotalVnd' in body and body['expectedTotalVnd'] != quote['total_vnd']:
                 raise HTTPException(409, 'Giá hoặc ưu đãi đã thay đổi. Vui lòng xem lại tổng tiền trước khi đặt hàng.')
             payment = str(body.get('paymentMethod', 'cod'))
             if payment != 'cod':
                 raise HTTPException(422, 'Thanh toán trực tuyến chưa được cấu hình; vui lòng chọn COD')
-            cur = conn.execute('''INSERT INTO orders(order_code,user_id,customer_name,email,phone,address,subtotal_vnd,discount_vnd,shipping_vnd,total_vnd,coupon_code,payment_method)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (code, user['id'] if user else None, str(customer['name']).strip(), str(customer.get('email', '')).strip(), phone, str(customer['address']).strip(), quote['subtotal_vnd'], quote['discount_vnd'], quote['shipping_vnd'], quote['total_vnd'], quote['coupon_code'] or None, payment))
+            cur = conn.execute('''INSERT INTO orders(order_code,user_id,customer_name,email,phone,address,subtotal_vnd,discount_vnd,shipping_vnd,total_vnd,coupon_code,payment_method,note)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''', (code, user['id'] if user else None, str(customer['name']).strip(), str(customer.get('email', '')).strip(), phone, str(customer['address']).strip(), quote['subtotal_vnd'], quote['discount_vnd'], quote['shipping_vnd'], quote['total_vnd'], quote['coupon_code'] or None, payment, note))
             order_id = cur.lastrowid
             for product_id, quantity, row in clean_items:
                 conn.execute('INSERT INTO order_items(order_id,product_id,product_name,unit_price_vnd,quantity) VALUES(?,?,?,?,?)', (order_id, product_id, row['name'], row['price_vnd'], quantity))
@@ -117,8 +134,11 @@ def place_order(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, 
                 conn.execute('INSERT INTO inventory_events(product_id,delta,reason,actor_id) VALUES(?,?,?,?)', (product_id, -quantity, f'Đơn {code}', user['id'] if user else None))
             if quote['coupon_code']:
                 conn.execute('UPDATE coupons SET used_count=used_count+1 WHERE code=? COLLATE NOCASE', (quote['coupon_code'],))
+            result = {'id': order_id, 'order_code': code, **quote, 'status': 'pending'}
+            if key_hash:
+                conn.execute('INSERT INTO order_idempotency(key_hash,request_hash,response_json) VALUES(?,?,?)', (key_hash, request_hash, json.dumps(result, ensure_ascii=False)))
             conn.execute('COMMIT')
         except Exception:
             conn.execute('ROLLBACK')
             raise
-    return {'id': order_id, 'order_code': code, **quote, 'status': 'pending'}
+    return result
