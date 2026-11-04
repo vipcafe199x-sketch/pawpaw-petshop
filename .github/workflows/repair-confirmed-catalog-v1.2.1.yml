@@ -1,0 +1,61 @@
+name: Restore three confirmed zero-price products
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/repair-confirmed-catalog-v1.2.1.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pawpaw-confirmed-catalog-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Back up and restore only confirmed SKUs during maintenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' EXIT
+          docker run -i --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python - <<'PY'
+          import json
+          from backend.database import connect
+          from backend.repair_reported_data import repair_reported_data
+          expected = {
+              'PP-005': (299000, 11, 'dem-ngu-meo'),
+              'PP-006': (79000, 42, 'bong-day-thung'),
+              'PP-007': (89000, 24, 'do-choi-ca-nhoi-bong'),
+          }
+          with connect() as conn:
+              before = {r['sku']:dict(r) for r in conn.execute('SELECT * FROM products')}
+          for sku,(price,stock,slug) in expected.items():
+              row = before.get(sku)
+              if not row or row['slug'] != slug:
+                  raise RuntimeError('Product identity mismatch; repair stopped')
+              if (row['price_vnd'],row['stock']) not in ((0,0),(price,stock)):
+                  raise RuntimeError('Stock or price changed since audit; repair stopped')
+          result = repair_reported_data(apply=True,product_repairs={sku:(v[0],v[1]) for sku,v in expected.items()},include_defaults=False,activate_repaired=True)
+          with connect() as conn:
+              after = {r['sku']:dict(r) for r in conn.execute('SELECT * FROM products')}
+          if set(before) != set(after):
+              raise RuntimeError('Catalog membership changed')
+          for sku,row in before.items():
+              if sku not in expected and after[sku] != row:
+                  raise RuntimeError('Unrelated product changed')
+              if sku in expected:
+                  desired = {**row,'price_vnd':expected[sku][0],'stock':expected[sku][1],'active':1}
+                  if after[sku] != desired:
+                      raise RuntimeError('Restoration verification failed')
+          print(json.dumps({'repair':result,'verified':True,'unrelated_products_unchanged':True,'restored':[{k:after[sku][k] for k in ('sku','name','price_vnd','stock','active')} for sku in expected]},ensure_ascii=False))
+          PY
+      - name: Verify live health and catalog after restart
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
+          docker exec pawpaw python -m backend.release_audit
