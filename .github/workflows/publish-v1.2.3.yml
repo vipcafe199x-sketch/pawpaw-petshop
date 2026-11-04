@@ -1,0 +1,94 @@
+name: Publish v1.2.3
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v1.2.3.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v1.2.3
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 15326ea03b09b57b0036167b744b887279b7b81f
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: npm ci
+      - run: npm test
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: vipcafe199x-sketch/pawpaw-petshop
+      RELEASE_SHA: 15326ea03b09b57b0036167b744b887279b7b81f
+    steps:
+      - name: Publish the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.2.3 >/dev/null 2>&1; then
+            test "$(gh api repos/$GH_REPO/git/ref/tags/v1.2.3 --jq .object.sha)" = "$RELEASE_SHA"
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Xóa sản phẩm và phiên biểu mẫu
+          - Có nút Xóa ở Sản phẩm/Kho và form sửa. Phải xác nhận đúng SKU; Hủy không xóa.
+          - Chặn xóa khi có đơn hàng, kể cả đơn hủy. Kiểm tra tồn kho mới, khóa giao dịch; lưu bản chụp sản phẩm/nhật ký kho vào kiểm toán trước khi xóa vật lý. Lỗi thì rollback toàn bộ.
+          - Dùng lại cookie CSRF hợp lệ, tránh đổi token giữa các tab. Khi đúng lỗi csrf_expired, tự làm mới và thử ghi lại tối đa một lần cùng payload; áp dụng cả upload ảnh.
+          - Giữ dữ liệu form khi refresh thất bại; không tự retry lỗi đăng nhập/quyền/Origin/xung đột/mạng/5xx; chống bấm lưu lặp.
+          - Không tự xóa PP-TEST-001/ABC, không bịa liên hệ, không sửa dữ liệu giá/tồn hoặc khuyến mãi khi deploy.
+
+          ## Kiểm chứng
+          36 API/database tests + 25 DOM tests, CI chạy lại trước phát hành. Có vòng tạo/sửa/xóa, chặn đơn, quyền/CSRF, kiểm toán/rollback, retry một lần và giữ form.
+          Test dùng database QA tạm, không đặt đơn hoặc xóa thử trên production. Chưa kiểm tra trực tiếp Safari/iPhone.
+          Deploy sao lưu và kiểm tra catalog không đổi, kiểm tra health/build v1.2.3; không xuất database/backup production vào log GitHub.
+          Hướng dẫn: docs/followup-v1.2.3.md.
+
+          NOTES
+          gh release create v1.2.3 --target "$RELEASE_SHA" --title "v1.2.3 — Xóa sản phẩm có xác nhận và tự làm mới phiên biểu mẫu" --notes-file release-notes.md --latest
+  deploy:
+    needs: release
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tested commit
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout --detach 15326ea03b09b57b0036167b744b887279b7b81f
+      - name: Protect database and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
+          curl -fsS http://127.0.0.1:8001/ | grep -q 'data-build="v1.2.3"'
+          curl -fsS http://127.0.0.1:8001/static/admin.js?v=v1.2.3 -o /tmp/pawpaw-admin-v1.2.3.js
+          test -s /tmp/pawpaw-admin-v1.2.3.js
