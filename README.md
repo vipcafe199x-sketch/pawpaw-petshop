@@ -84,3 +84,7 @@ Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an to
 ## v1.2.5 bảo mật
 
 [Phạm vi gia cố và các giới hạn bảo mật chưa giải quyết](docs/security-v1.2.5.md): schema chỉ cho admin ở production, chặn đường dotfile, gia cố rate limit, cấu hình ẩn phiên bản server và test quyền/CSRF/giá/khôi phục QA. Không đồng nghĩa đã kiểm thử xâm nhập toàn diện; MFA, guest lookup và hạ tầng vẫn cần đánh giá trước vận hành thật.
+
+## v1.2.6 audit follow-up
+
+See [audit remediation and rollout limits](docs/audit-remediation-v1.2.6.md). Staging, backup/restore rehearsal and shop-owner confirmation of the return policy are required before production release.

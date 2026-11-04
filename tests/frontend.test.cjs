@@ -2,6 +2,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {parseHTML}=require('linkedom');
+const {webcrypto}=require('node:crypto');
 const vm=require('node:vm');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -18,7 +19,7 @@ function harness(){
  const settings={store_name:'QA',low_stock_threshold:5};
  const switches={publicFilter:false,rejectStatus:false,quoteError:false,quoteOverride:null,csrfFailures:0,csrfRefreshError:false,mutationFailure:0,deleteRejected:false};const writes=[],calls=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
  let location=new URL('https://qa.test/admin/products');
- const context={window,document,console,Intl,Date,URL,URLSearchParams,Set,Map,Blob,navigator:{},localStorage:storage(),sessionStorage:storage(),setTimeout:()=>1,clearTimeout:()=>{},get location(){return location},history:{pushState:(_,__,url)=>{location=new URL(url,location)}},FormData:class{},fetch:async(url,options={})=>{
+ const context={window,document,console,Intl,Date,URL,URLSearchParams,Set,Map,Blob,crypto:webcrypto,TextEncoder,Uint8Array,navigator:{},localStorage:storage(),sessionStorage:storage(),setTimeout:()=>1,clearTimeout:()=>{},get location(){return location},history:{pushState:(_,__,url)=>{location=new URL(url,location)}},FormData:class{},fetch:async(url,options={})=>{
   calls.push({url,method:options.method||'GET',headers:options.headers||{},body:options.body});
   if(options.method&&switches.mutationFailure)return {ok:false,status:switches.mutationFailure,json:async()=>({detail:'TEST REQUEST REJECTED'})};
   if(options.method&&switches.csrfFailures>0){switches.csrfFailures--;return {ok:false,status:403,json:async()=>({detail:{code:'csrf_expired',message:'TEST CSRF EXPIRED'}})}}
@@ -262,4 +263,22 @@ test('cart and checkout display applied coupon terms from the server, never a ha
  h.switches.quoteOverride={...h.switches.quoteOverride,discount_vnd:96000,total_vnd:224000,coupon_terms:{discount_type:'percent',discount_value:30,minimum_vnd:150000}};await h.run('refreshCartQuote()');h.run('updateQuoteUI()');assert.match(h.document.querySelector('[data-coupon-terms]').textContent,/Giảm 30%/);assert.doesNotMatch(h.document.querySelector('[data-coupon-terms]').textContent,/10%/);
  h.document.querySelector('#app').innerHTML=h.run('checkout()');assert.match(h.document.querySelector('.quote-coupon-terms').textContent,/Giảm 30%/);assert.match(h.document.querySelector('[data-quote-total]').textContent,/224\.000/);
  h.switches.quoteOverride={...h.switches.quoteOverride,coupon_code:'',coupon_terms:null,discount_vnd:0};await h.run('refreshCartQuote()');assert.doesNotMatch(h.run('couponTermsLabel()'),/PAWPAW10|10%|30%/);
+});
+
+
+test('admin search treats query as text rather than injected markup',async()=>{
+ const h=harness();h.run("STATE.user={role:'admin',full_name:'QA'}");h.navigate('/admin/search?q='+encodeURIComponent('</p><p id="qa-injected">X</p><p>'));
+ await h.run('render()');assert.equal(h.document.querySelector('#qa-injected'),null);assert.match(h.document.querySelector('.admin-content').textContent,/<p id=/);
+});
+
+test('checkout key is stable per payload without storing private form values',async()=>{
+ const h=harness();const p={customer:{phone:'0901111111',address:'QA STREET'},items:[1]};h.run('payload='+JSON.stringify(p));
+ const a=await h.run('checkoutRequestKey(payload)'),b=await h.run('checkoutRequestKey(payload)');assert.equal(a,b);
+ assert.doesNotMatch(h.run("sessionStorage.getItem('pawpaw-checkout-key')"),/0901111111|QA STREET/);
+ h.run("payload.customer.address='OTHER'");const c=await h.run('checkoutRequestKey(payload)');assert.notEqual(a,c);
+});
+
+test('default catalog price slider does not hide products above one million',async()=>{
+ const h=harness();h.products[0].price_vnd=1500000;h.navigate('/shop');await h.run('render()');
+ assert.equal(h.document.querySelector('[data-product-id="6"]').hidden,false);
 });

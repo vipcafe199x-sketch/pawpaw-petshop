@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS orders (
   tracking_code TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS order_idempotency (
+  key_hash TEXT PRIMARY KEY,
+  request_hash TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(phone);
 CREATE TABLE IF NOT EXISTS order_items (
@@ -101,8 +107,7 @@ CREATE TABLE IF NOT EXISTS appointments (
   note TEXT NOT NULL DEFAULT '',
   price_vnd INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','confirmed','completed','cancelled')),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(service_date, time_slot, staff_name)
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_appointments_date_status ON appointments(service_date, status);
 CREATE TABLE IF NOT EXISTS returns (

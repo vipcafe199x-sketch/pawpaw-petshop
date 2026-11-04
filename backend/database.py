@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -60,12 +61,34 @@ def init_db() -> None:
             'products': {'brand': "TEXT NOT NULL DEFAULT ''", 'specifications': "TEXT NOT NULL DEFAULT ''", 'image_url': "TEXT NOT NULL DEFAULT ''"},
             'coupons': {'starts_at': "TEXT NOT NULL DEFAULT ''"},
             'users': {'archived': 'INTEGER NOT NULL DEFAULT 0'},
+            'orders': {'note': "TEXT NOT NULL DEFAULT ''", 'delivered_at': 'TEXT'},
         }
         for table, columns in additions.items():
             existing = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
             for column, definition in columns.items():
                 if column not in existing:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+        # Legacy UNIQUE included cancelled bookings. Rebuild atomically, preserving rows.
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='appointments'").fetchone()['sql']
+        if re.search(r'UNIQUE\s*\(\s*service_date\s*,\s*time_slot\s*,\s*staff_name\s*\)', schema, re.I):
+            replacement = re.sub(r',\s*UNIQUE\s*\(\s*service_date\s*,\s*time_slot\s*,\s*staff_name\s*\)', '', schema, flags=re.I)
+            replacement = re.sub(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?appointments["`\]]?', 'CREATE TABLE appointments_migration', replacement, count=1, flags=re.I)
+            if 'CREATE TABLE appointments_migration' not in replacement:
+                raise RuntimeError('Unexpected appointments schema; migration stopped')
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                conn.execute(replacement)
+                conn.execute('INSERT INTO appointments_migration SELECT * FROM appointments')
+                conn.execute('DROP TABLE appointments')
+                conn.execute('ALTER TABLE appointments_migration RENAME TO appointments')
+                conn.execute('CREATE INDEX idx_appointments_date_status ON appointments(service_date,status)')
+                conn.execute("CREATE UNIQUE INDEX idx_appointments_active_slot ON appointments(service_date,time_slot,staff_name) WHERE status != 'cancelled'")
+                conn.execute('COMMIT')
+            except Exception:
+                conn.execute('ROLLBACK')
+                raise
+        else:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_active_slot ON appointments(service_date,time_slot,staff_name) WHERE status != 'cancelled'")
         if fresh_database:
             for idx, row in enumerate(DEFAULT_PRODUCTS):
                 slug, name, category, species, price, compare, stock, emoji, desc = row
