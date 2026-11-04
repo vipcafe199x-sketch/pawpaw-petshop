@@ -72,3 +72,7 @@ Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an to
 ## v1.2.2 nguồn dữ liệu
 
 [Làm rõ PP-005, sản phẩm bánh thưởng, WELCOME10, liên hệ thật và ABC](docs/followup-v1.2.2.md). Trang hỗ trợ dùng settings, bỏ liên hệ mẫu. Công cụ `python -m backend.catalog_evidence` chạy chỉ đọc tại máy chủ của chủ shop để đối chiếu backup; không tự tạo/xóa/khôi phục dữ liệu.
+
+## v1.2.3 quản lý sản phẩm
+
+[Xóa sản phẩm có xác nhận, chặn liên kết đơn hàng và tự làm mới phiên biểu mẫu](docs/followup-v1.2.3.md). Chưa tự dọn PP-TEST-001/ABC; thử nghiệm tạo/sửa/xóa chỉ chạy trên QA.

@@ -12,13 +12,31 @@ function loadCart(){try{return JSON.parse(localStorage.getItem("pawpaw-cart")||"
 function saveCart(){localStorage.setItem("pawpaw-cart",JSON.stringify(STATE.cart))}
 function countCart(){return STATE.cart.reduce((n,x)=>n+x.quantity,0)}
 function toast(message,kind="success"){const root=document.querySelector("#toast-root");if(!root)return;root.innerHTML=`<div class="toast ${kind}">${esc(message)}</div>`;clearTimeout(STATE.toastTimer);STATE.toastTimer=setTimeout(()=>root.innerHTML="",3200)}
+let csrfRefreshPromise=null;
+async function refreshCSRF(){
+ if(!csrfRefreshPromise)csrfRefreshPromise=(async()=>{
+  const response=await fetch('/api/csrf',{credentials:'same-origin',cache:'no-store'});
+  const data=await response.json();
+  if(!response.ok||typeof data.csrfToken!=='string'||!data.csrfToken)throw Error('Không thể làm mới phiên biểu mẫu. Dữ liệu đang nhập vẫn được giữ.');
+  STATE.csrf=data.csrfToken;return data.csrfToken;
+ })().finally(()=>{csrfRefreshPromise=null});
+ return csrfRefreshPromise;
+}
 async function api(path,options={}){
+ const method=(options.method||'GET').toUpperCase(),mutation=!['GET','HEAD','OPTIONS'].includes(method);
+ if(mutation&&!STATE.csrf)await refreshCSRF();
+ for(let attempt=0;attempt<2;attempt++){
   const headers={...(options.headers||{})};
-  if(options.body){headers["Content-Type"]="application/json";headers["X-CSRF-Token"]=STATE.csrf;}
-  const response=await fetch(path,{...options,headers,credentials:"same-origin"});
-  const data=await response.json().catch(()=>({detail:"Máy chủ trả về dữ liệu không hợp lệ"}));
-  if(!response.ok)throw new Error(data.detail||"Có lỗi xảy ra, thử lại giúp PawPaw nhé.");
+  if(options.body&&!Object.keys(headers).some(k=>k.toLowerCase()==='content-type'))headers['Content-Type']='application/json';
+  if(mutation)headers['X-CSRF-Token']=STATE.csrf;
+  const response=await fetch(path,{...options,headers,credentials:'same-origin'});
+  const data=await response.json().catch(()=>({detail:'Máy chủ trả về dữ liệu không hợp lệ'}));
+  if(mutation&&attempt===0&&response.status===403&&data.detail?.code==='csrf_expired'){
+   await refreshCSRF();continue;
+  }
+  if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:data.detail?.message||'Có lỗi xảy ra, thử lại giúp PawPaw nhé.');
   return data;
+ }
 }
 async function init(){
   try{STATE.csrf=(await api("/api/csrf")).csrfToken;STATE.user=await api("/api/auth/me");const settings=await api("/api/storefront/settings");syncStoreSettings(settings);}

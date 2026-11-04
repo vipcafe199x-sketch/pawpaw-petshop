@@ -16,10 +16,16 @@ function harness(){
  const promo={code:'QA10',discount_type:'percent',discount_value:10,minimum_vnd:0,usage_limit:10,active:1,used_count:0,starts_at:'',expires_at:''};
  const customer={id:9,full_name:'TEST CUSTOMER',email:'qa@example.invalid',phone:'0000000000',spent_vnd:0,order_count:0,tier:'Thành viên mới',orders:[order],archived:0};
  const settings={store_name:'QA',low_stock_threshold:5};
- const switches={publicFilter:false,rejectStatus:false,quoteError:false};const writes=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
+ const switches={publicFilter:false,rejectStatus:false,quoteError:false,csrfFailures:0,csrfRefreshError:false,mutationFailure:0,deleteRejected:false};const writes=[],calls=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
  let location=new URL('https://qa.test/admin/products');
  const context={window,document,console,Intl,Date,URL,URLSearchParams,Set,Map,Blob,navigator:{},localStorage:storage(),sessionStorage:storage(),setTimeout:()=>1,clearTimeout:()=>{},get location(){return location},history:{pushState:(_,__,url)=>{location=new URL(url,location)}},FormData:class{},fetch:async(url,options={})=>{
-  let data;if(url==='/api/orders/quote'){if(switches.quoteError)return {ok:false,json:async()=>({detail:'TEST COUPON INVALID'})};data={subtotal_vnd:400000,discount_vnd:40000,shipping_vnd:0,total_vnd:360000,coupon_code:'TEST10'}}
+  calls.push({url,method:options.method||'GET',headers:options.headers||{},body:options.body});
+  if(options.method&&switches.mutationFailure)return {ok:false,status:switches.mutationFailure,json:async()=>({detail:'TEST REQUEST REJECTED'})};
+  if(options.method&&switches.csrfFailures>0){switches.csrfFailures--;return {ok:false,status:403,json:async()=>({detail:{code:'csrf_expired',message:'TEST CSRF EXPIRED'}})}}
+  let data;if(url==='/api/csrf'){if(switches.csrfRefreshError)return {ok:false,status:503,json:async()=>({detail:'TEST REFRESH FAILED'})};data={csrfToken:'QA-FRESH-TOKEN'}}
+  else if(url==='/api/admin/uploads'&&options.method==='POST'){writes.push({url,body:options.body});data={image_url:'/uploads/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp'}}
+  else if(options.method==='DELETE'){if(switches.deleteRejected)return {ok:false,status:409,json:async()=>({detail:'TEST ORDER EXISTS'})};const id=Number(url.split('/').pop());writes.push({url,body:JSON.parse(options.body)});products.splice(products.findIndex(p=>p.id===id),1);data={deleted:true,id}}
+  else if(url==='/api/orders/quote'){if(switches.quoteError)return {ok:false,json:async()=>({detail:'TEST COUPON INVALID'})};data={subtotal_vnd:400000,discount_vnd:40000,shipping_vnd:0,total_vnd:360000,coupon_code:'TEST10'}}
   else if(options.method==='POST'&&url.startsWith('/api/admin/')){writes.push({url,body:JSON.parse(options.body)});data={ok:true}}
   else if(options.method==='PATCH'){if(url.includes('/orders/')&&switches.rejectStatus)return {ok:false,json:async()=>({detail:'TEST TRANSITION REJECTED'})};writes.push({url,body:JSON.parse(options.body)});data=url.includes('/orders/')?{...order,status:JSON.parse(options.body).status}:{...products[0],...JSON.parse(options.body)}}
   else if(url==='/api/admin/products'||url.startsWith('/api/products?')||url==='/api/products')data=switches.publicFilter&&url!=='/api/admin/products'?products.filter(p=>p.active&&p.price_vnd>0):products;
@@ -44,7 +50,7 @@ function harness(){
  const proto=window.HTMLElement.prototype;
  Object.defineProperty(proto,'checked',{get(){return this.hasAttribute('checked')},set(value){this.toggleAttribute('checked',!!value)},configurable:true});
  proto.showModal=function(){this.setAttribute('open','')};proto.close=function(){this.removeAttribute('open');this.dispatchEvent(new window.Event('close'))};
- return {document,window,products,order,writes,switches,promo,settings,report,run,prepareDialog,navigate:url=>{location=new URL(url,location)}};
+ return {document,window,products,order,writes,calls,switches,promo,settings,report,run,prepareDialog,navigate:url=>{location=new URL(url,location)}};
 }
 
 test('product editor preloads values; cancel and blank submit never write; explicit save writes values',async()=>{
@@ -196,4 +202,43 @@ test('public support uses configured store contacts, no hardcoded design contact
 test('promotion dialog discloses actual database dates and explicitly explains unlimited dates',async()=>{
  const h=harness();h.promo.starts_at='2027-01-02';h.promo.expires_at='2027-01-31';await h.run("openPromotionEditor('QA10')");let {d,form}=h.prepareDialog('promotion-editor');assert.equal(form.elements.starts_at.value,'2027-01-02');assert.match(d.querySelector('[data-promotion-date-source]').textContent,/02\/01\/2027 → 31\/01\/2027/);d.querySelector('[data-editor-close]').click();
  h.promo.starts_at='';h.promo.expires_at='';await h.run("openPromotionEditor('QA10')");({d,form}=h.prepareDialog('promotion-editor'));assert.equal(form.elements.expires_at.value,'');assert.match(d.querySelector('[data-promotion-date-source]').textContent,/Không giới hạn → Không giới hạn/);assert.equal(h.writes.length,0);
+});
+
+test('delete button asks for typed SKU; cancel/wrong SKU do nothing; confirmed delete removes row and closes editor',async()=>{
+ const h=harness();h.run("STATE.user={role:'admin'};STATE.csrf='QA-CURRENT'");await h.run('render()');
+ h.document.querySelector('[data-delete-product="6"]').click();await tick();let {d,form}=h.prepareDialog('product-delete-confirm');assert.match(d.textContent,/TEST PRODUCT|TEST-006/);d.querySelector('[data-editor-close]').click();assert.equal(h.writes.length,0);
+ await h.run('openProductEditor(6)');h.document.querySelector('#product-editor [data-delete-product]').click();await tick();({d,form}=h.prepareDialog('product-delete-confirm'));
+ form.elements.confirm_sku.value='WRONG';form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.equal(h.writes.length,0);assert.match(d.querySelector('.editor-error').textContent,/SKU xác nhận không khớp/);
+ h.switches.csrfFailures=1;form.elements.confirm_sku.value='TEST-006';form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
+ assert.equal(h.writes.length,1);assert.deepEqual(h.writes[0].body,{confirm_sku:'TEST-006',expected_stock:19});assert.equal(h.calls.filter(c=>c.method==='DELETE').length,2);
+ assert.equal(h.document.querySelector('#product-editor'),null);assert.equal(h.document.querySelector('#product-delete-confirm'),null);assert.equal(h.document.querySelector('[data-edit-product="6"]'),null);
+});
+
+test('delete blocks known order links and server rejection keeps confirmation open',async()=>{
+ const h=harness();h.products[0].order_count=1;await h.run('openProductDeletion(6)');let {d,form}=h.prepareDialog('product-delete-confirm');assert.equal(d.querySelector('[type=submit]').disabled,true);assert.match(d.textContent,/kể cả đơn hủy/);
+ form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();assert.equal(d.querySelector('[type=submit]').disabled,true);assert.equal(h.writes.length,0);d.querySelector('[data-editor-close]').click();
+ h.products[0].order_count=0;h.switches.deleteRejected=true;await h.run('openProductDeletion(6)');({d,form}=h.prepareDialog('product-delete-confirm'));form.elements.confirm_sku.value='TEST-006';form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();assert.match(d.querySelector('.editor-error').textContent,/TEST ORDER EXISTS/);assert.ok(h.document.querySelector('#product-delete-confirm'));assert.equal(h.writes.length,0);
+});
+
+test('expired CSRF during first create transparently refreshes once, preserves payload and avoids double submission',async()=>{
+ const h=harness();h.run("STATE.csrf='QA-STALE';STATE.user={role:'admin'}");h.switches.csrfFailures=1;await h.run('openProductEditor()');const {form}=h.prepareDialog();
+ for(const [name,value] of Object.entries({sku:'QA-CSRF',slug:'qa-csrf',name:'QA CSRF PRODUCT',price_vnd:'10000',compare_price_vnd:'0',stock:'3',description:'QA KEPT DESCRIPTION'}))form.elements[name].value=value;
+ form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();
+ const attempts=h.calls.filter(c=>c.url==='/api/admin/products'&&c.method==='POST');assert.equal(attempts.length,2);assert.equal(attempts[0].body,attempts[1].body);assert.equal(attempts[0].headers['X-CSRF-Token'],'QA-STALE');assert.equal(attempts[1].headers['X-CSRF-Token'],'QA-FRESH-TOKEN');assert.equal(h.calls.filter(c=>c.url==='/api/csrf').length,1);assert.equal(h.writes.length,1);assert.equal(h.writes[0].body.description,'QA KEPT DESCRIPTION');
+});
+
+test('CSRF refresh failure retains dirty form and never submits product a second time',async()=>{
+ const h=harness();h.run("STATE.csrf='QA-STALE'");h.switches.csrfFailures=1;h.switches.csrfRefreshError=true;await h.run('openProductEditor(6)');const {d,form}=h.prepareDialog();form.elements.name.value='QA KEPT NAME';form.elements.description.value='QA KEPT DESCRIPTION';
+ form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await tick();await tick();assert.equal(h.writes.length,0);assert.equal(form.elements.name.value,'QA KEPT NAME');assert.equal(form.elements.description.value,'QA KEPT DESCRIPTION');assert.equal(d.hasAttribute('open'),true);assert.equal(d.querySelector('[type=submit]').disabled,false);assert.match(d.querySelector('.editor-error').textContent,/Không thể làm mới phiên/);assert.equal(h.calls.filter(c=>c.method==='PATCH').length,1);
+});
+
+test('automatic retry is bounded and never retries auth, origin, conflict, server or network errors',async()=>{
+ for(const status of [401,403,409,500]){const h=harness();h.run("STATE.csrf='QA-TOKEN'");h.switches.mutationFailure=status;await assert.rejects(h.run("api('/api/admin/products/6',{method:'PATCH',body:JSON.stringify({stock:1})})"),/TEST REQUEST REJECTED/);assert.equal(h.calls.filter(c=>c.method==='PATCH').length,1);assert.equal(h.calls.filter(c=>c.url==='/api/csrf').length,0)}
+ const h=harness();h.run("STATE.csrf='QA-TOKEN'");h.switches.csrfFailures=2;await assert.rejects(h.run("api('/api/admin/products/6',{method:'PATCH',body:JSON.stringify({stock:1})})"),/TEST CSRF EXPIRED/);assert.equal(h.calls.filter(c=>c.method==='PATCH').length,2);assert.equal(h.calls.filter(c=>c.url==='/api/csrf').length,1);assert.equal(h.writes.length,0);
+ h.run("fetch=async()=>{throw Error('QA NETWORK FAILURE')}");await assert.rejects(h.run("api('/api/admin/products/6',{method:'PATCH',body:'{}'})"),/QA NETWORK FAILURE/);
+});
+
+test('concurrent requests share CSRF refresh and binary upload retries the same immutable body once',async()=>{
+ const h=harness();await h.run("Promise.all([api('/api/admin/inventory',{method:'POST',body:'{}'}),api('/api/admin/inventory',{method:'POST',body:'{}'})])");assert.equal(h.calls.filter(c=>c.url==='/api/csrf').length,1);assert.equal(h.writes.length,2);
+ const upload=harness();upload.run("STATE.csrf='QA-STALE'");upload.switches.csrfFailures=1;await upload.run("api('/api/admin/uploads',{method:'POST',headers:{'Content-Type':'image/png'},body:new Blob(['QA IMAGE'],{type:'image/png'})})");const attempts=upload.calls.filter(c=>c.url==='/api/admin/uploads');assert.equal(attempts.length,2);assert.equal(attempts[0].body,attempts[1].body);assert.equal(attempts[1].headers['Content-Type'],'image/png');assert.equal(upload.writes.length,1);assert.equal(upload.writes[0].body,attempts[0].body);
 });

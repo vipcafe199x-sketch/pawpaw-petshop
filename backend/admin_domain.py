@@ -2,6 +2,7 @@
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import re
+import json
 import unicodedata
 from fastapi import HTTPException
 from backend.database import connect
@@ -33,7 +34,8 @@ def stock_status(product, threshold):
 
 def catalog_admin(conn):
     threshold=low_threshold(conn)
-    return [{**dict(p),'stock_status':stock_status(p,threshold),'low_stock_threshold':threshold} for p in conn.execute('SELECT * FROM products ORDER BY id DESC')]
+    orders={r['product_id']:r['n'] for r in conn.execute('SELECT product_id,COUNT(DISTINCT order_id) n FROM order_items GROUP BY product_id')}
+    return [{**dict(p),'stock_status':stock_status(p,threshold),'low_stock_threshold':threshold,'order_count':orders.get(p['id'],0)} for p in conn.execute('SELECT * FROM products ORDER BY id DESC')]
 
 def product_values(body, current=None):
     if not isinstance(body,dict): raise HTTPException(422,'Dữ liệu sản phẩm không hợp lệ')
@@ -80,6 +82,32 @@ def write_product(body, admin_id, product_id=None):
             conn.execute('ROLLBACK')
             if 'UNIQUE constraint failed' in str(error): raise HTTPException(409,'SKU hoặc đường dẫn đã tồn tại')
             raise
+
+def delete_product(body, admin_id, product_id):
+    if not isinstance(body,dict): raise HTTPException(422,'Nhập SKU để xác nhận xóa')
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            row=conn.execute('SELECT * FROM products WHERE id=?',(product_id,)).fetchone()
+            if not row: raise HTTPException(404,'Không tìm thấy sản phẩm; có thể đã được xóa')
+            if body.get('confirm_sku')!=row['sku']: raise HTTPException(422,'SKU xác nhận không khớp; chưa xóa sản phẩm')
+            if conn.execute('SELECT 1 FROM order_items WHERE product_id=? LIMIT 1',(product_id,)).fetchone():
+                raise HTTPException(409,'Sản phẩm đã có đơn hàng (kể cả đơn hủy), không thể xóa. Hãy chuyển sang Nháp để ẩn khỏi shop.')
+            if integer(body.get('expected_stock'))!=row['stock']:
+                raise HTTPException(409,'Tồn kho đã thay đổi. Hãy mở lại xác nhận xóa để kiểm tra dữ liệu mới.')
+            history=[dict(e) for e in conn.execute('SELECT * FROM inventory_events WHERE product_id=? ORDER BY id',(product_id,))]
+            # Archive the stock ledger with the deletion audit before removing FK rows.
+            snapshot={'product':dict(row),'inventory_events':history,'actor_id':admin_id}
+            conn.execute('INSERT INTO operational_adjustments(event_type,subject_id,before_json,after_json,reason) VALUES(?,?,?,?,?)',
+                ('product_deleted',str(product_id),json.dumps(snapshot,ensure_ascii=False),json.dumps({'deleted':True}),'Admin confirmed deletion of unordered product by SKU'))
+            conn.execute('DELETE FROM inventory_events WHERE product_id=?',(product_id,))
+            conn.execute('DELETE FROM products WHERE id=?',(product_id,))
+            conn.commit()
+            return {'deleted':True,'id':product_id,'sku':row['sku']}
+        except Exception:
+            conn.rollback()
+            raise
+
 
 def promotion_values(body, current=None):
     values=coupon_view(current) if current else {'discount_type':'percent','minimum_vnd':0,'usage_limit':0,'active':1,'starts_at':'','expires_at':''}

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.database import connect, init_db, db_path
 from backend.coupon_dates import coupon_view
-from backend.admin_domain import write_product, promotion_values, catalog_admin, low_threshold, report_data, tier, integer, text, APPOINTMENT_TRANSITIONS
+from backend.admin_domain import write_product, delete_product, promotion_values, catalog_admin, low_threshold, report_data, tier, integer, text, APPOINTMENT_TRANSITIONS
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
 from backend.services.orders import place_order, quote_order, restore_cancelled_stock
 
@@ -76,7 +76,7 @@ def require_csrf(request: Request) -> None:
     cookie = request.cookies.get("pawpaw_csrf")
     header = request.headers.get("x-csrf-token")
     if not csrf_matches(cookie, header):
-        raise HTTPException(403, "Phiên biểu mẫu hết hạn. Tải lại trang rồi thử lại.")
+        raise HTTPException(403, {"code":"csrf_expired","message":"Phiên biểu mẫu hết hạn. Vui lòng thử lưu lại."})
 
 
 def current_user(request: Request) -> dict[str, Any] | None:
@@ -119,8 +119,10 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/csrf")
-def csrf(response: Response) -> dict[str, str]:
-    token = new_csrf()
+def csrf(request: Request, response: Response) -> dict[str, str]:
+    token = request.cookies.get("pawpaw_csrf")
+    if not csrf_matches(token, token):
+        token = new_csrf()
     response.set_cookie("pawpaw_csrf", token, httponly=False, secure=COOKIE_SECURE, samesite="strict", max_age=3600, path="/")
     return {"csrfToken": token}
 
@@ -414,6 +416,16 @@ async def create_product(request: Request, admin: dict[str, Any] = Depends(admin
 async def update_product(product_id: int, request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     require_csrf(request)
     return write_product(await request.json(), admin['id'], product_id)
+
+
+@app.delete('/api/admin/products/{product_id}')
+async def remove_product(product_id: int, request: Request, admin: dict[str, Any] = Depends(admin_user)):
+    require_csrf(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422,'Nhập SKU để xác nhận xóa sản phẩm')
+    return delete_product(body,admin['id'],product_id)
 
 
 @app.post("/api/admin/inventory")

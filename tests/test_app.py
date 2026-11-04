@@ -528,5 +528,104 @@ class PawPawApiTests(unittest.TestCase):
             self.assertIn('cannot prove',result['limitation'])
             self.assertTrue(evidence(current,limit=0)['truncated'])
 
+
+    def test_product_create_edit_delete_archives_ledger_and_removes_public_and_admin_rows(self):
+        import json
+        p,other=self.product(),self.product()
+        url=f"/api/admin/products/{p['id']}"
+        edited=self.client.patch(url,headers=self.headers,json={'name':'QA EDITED PRODUCT','stock':p['stock']+2,'expected_stock':p['stock']})
+        self.assertEqual(edited.status_code,200)
+        with connect() as conn:
+            ledger=[dict(r) for r in conn.execute('SELECT * FROM inventory_events WHERE product_id=? ORDER BY id',(p['id'],))]
+            other_before=dict(conn.execute('SELECT * FROM products WHERE id=?',(other['id'],)).fetchone())
+        self.assertGreaterEqual(len(ledger),2)
+        response=self.client.request('DELETE',url,headers=self.headers,json={'confirm_sku':p['sku'],'expected_stock':p['stock']+2})
+        self.assertEqual(response.status_code,200,response.text);self.assertTrue(response.json()['deleted'])
+        self.assertEqual(self.client.get('/api/products/'+p['slug']).status_code,404)
+        self.assertEqual(self.client.get('/api/products',params={'q':p['sku']}).json(),[])
+        self.assertFalse(any(r['id']==p['id'] for r in self.client.get('/api/admin/products').json()))
+        with connect() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM products WHERE id=?',(p['id'],)).fetchone())
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(p['id'],)).fetchone()[0],0)
+            audit=conn.execute("SELECT * FROM operational_adjustments WHERE event_type='product_deleted' AND subject_id=?",(str(p['id']),)).fetchone()
+            snapshot=json.loads(audit['before_json'])
+            self.assertEqual(snapshot['product']['name'],'QA EDITED PRODUCT');self.assertEqual(snapshot['inventory_events'],ledger)
+            self.assertGreater(snapshot['actor_id'],0);self.assertEqual(dict(conn.execute('SELECT * FROM products WHERE id=?',(other['id'],)).fetchone()),other_before)
+        self.assertEqual(self.client.request('DELETE',url,headers=self.headers,json={'confirm_sku':p['sku'],'expected_stock':p['stock']+2}).status_code,404)
+
+    def test_delete_requires_exact_confirmation_fresh_stock_auth_and_csrf(self):
+        p=self.product();url=f"/api/admin/products/{p['id']}";body={'confirm_sku':p['sku'],'expected_stock':p['stock']}
+        for invalid in ({},{'confirm_sku':'WRONG','expected_stock':p['stock']},{'confirm_sku':p['sku']},{'confirm_sku':p['sku'],'expected_stock':True}):
+            self.assertEqual(self.client.request('DELETE',url,headers=self.headers,json=invalid).status_code,422)
+        self.assertEqual(self.client.request('DELETE',url,headers=self.headers,json={**body,'expected_stock':p['stock']-1}).status_code,409)
+        self.assertEqual(self.client.request('DELETE',url,json=body).status_code,403)
+        with TestClient(app) as visitor:
+            token=visitor.get('/api/csrf').json()['csrfToken'];headers={'X-CSRF-Token':token}
+            self.assertEqual(visitor.request('DELETE',url,headers=headers,json=body).status_code,401)
+            r=visitor.post('/api/auth/register',headers=headers,json={'email':'qa-'+secrets.token_hex(6)+'@example.invalid','password':secrets.token_urlsafe(24),'fullName':'QA CUSTOMER','phone':'0000000000'})
+            self.assertEqual(r.status_code,200)
+            self.assertEqual(visitor.request('DELETE',url,headers=headers,json=body).status_code,403)
+        self.assertEqual(self.stock(p),p['stock'])
+        with connect() as conn: self.assertEqual(conn.execute("SELECT COUNT(*) FROM operational_adjustments WHERE event_type='product_deleted' AND subject_id=?",(str(p['id']),)).fetchone()[0],0)
+
+    def test_delete_blocks_all_order_links_including_cancelled(self):
+        for cancel in (False,True):
+            p=self.product();order=self.order(p).json()
+            if cancel: self.client.patch(f"/api/admin/orders/{order['id']}",headers=self.headers,json={'status':'cancelled'})
+            before=self.stock(p)
+            response=self.client.request('DELETE',f"/api/admin/products/{p['id']}",headers=self.headers,json={'confirm_sku':p['sku'],'expected_stock':before})
+            self.assertEqual(response.status_code,409,response.text)
+            self.assertEqual(self.stock(p),before)
+            product=next(r for r in self.client.get('/api/admin/products').json() if r['id']==p['id'])
+            self.assertEqual(product['order_count'],1)
+            with connect() as conn: self.assertEqual(conn.execute('SELECT product_id FROM order_items WHERE order_id=?',(order['id'],)).fetchone()[0],p['id'])
+
+    def test_delete_rolls_back_audit_and_ledger_if_product_delete_fails(self):
+        p=self.product()
+        with connect() as conn:
+            ledger=conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(p['id'],)).fetchone()[0]
+            conn.execute(f"CREATE TRIGGER qa_block_delete BEFORE DELETE ON products WHEN OLD.id={p['id']} BEGIN SELECT RAISE(ABORT,'QA block deletion'); END")
+        try:
+            with self.assertRaises(Exception):
+                self.client.request('DELETE',f"/api/admin/products/{p['id']}",headers=self.headers,json={'confirm_sku':p['sku'],'expected_stock':p['stock']})
+            self.assertEqual(self.stock(p),p['stock'])
+            with connect() as conn:
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(p['id'],)).fetchone()[0],ledger)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM operational_adjustments WHERE event_type='product_deleted' AND subject_id=?",(str(p['id']),)).fetchone()[0],0)
+        finally:
+            with connect() as conn: conn.execute('DROP TRIGGER qa_block_delete')
+
+    def test_csrf_reuses_valid_cookie_and_refreshes_expired_cookie_before_one_create(self):
+        old=self.headers['X-CSRF-Token']
+        self.assertEqual(self.client.get('/api/csrf').json()['csrfToken'],old)
+        self.assertEqual(self.client.get('/api/csrf').json()['csrfToken'],old)
+        self.client.cookies.delete('pawpaw_csrf')
+        token=secrets.token_hex(6);body={'sku':'QA-'+token,'name':'QA CSRF '+token,'price_vnd':10000,'stock':3}
+        failed=self.client.post('/api/admin/products',headers=self.headers,json=body)
+        self.assertEqual(failed.status_code,403);self.assertEqual(failed.json()['detail']['code'],'csrf_expired')
+        with connect() as conn: self.assertEqual(conn.execute('SELECT COUNT(*) FROM products WHERE sku=?',(body['sku'],)).fetchone()[0],0)
+        self.headers['X-CSRF-Token']=self.client.get('/api/csrf').json()['csrfToken']
+        self.assertNotEqual(old,self.headers['X-CSRF-Token'])
+        saved=self.client.post('/api/admin/products',headers=self.headers,json=body)
+        self.assertEqual(saved.status_code,200,saved.text)
+        with connect() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM products WHERE sku=?',(body['sku'],)).fetchone()[0],1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(saved.json()['id'],)).fetchone()[0],1)
+        rejected=self.client.patch(f"/api/admin/products/{saved.json()['id']}",headers={**self.headers,'Origin':'https://untrusted.example.invalid'},json={'stock':0})
+        self.assertEqual(rejected.status_code,403);self.assertEqual(rejected.json()['detail'],'Origin không hợp lệ')
+        self.assertEqual(self.stock(saved.json()),3)
+
+    def test_csrf_guard_rejects_upload_before_file_write_and_retains_upload_on_valid_token(self):
+        import io
+        from PIL import Image
+        from backend.main import UPLOAD_DIR
+        data=io.BytesIO();Image.new('RGB',(12,12),'blue').save(data,'PNG')
+        before=set(UPLOAD_DIR.glob('*.webp'))
+        r=self.client.post('/api/admin/uploads',headers={'X-CSRF-Token':'QA-STALE','Content-Type':'image/png'},content=data.getvalue())
+        self.assertEqual(r.status_code,403);self.assertEqual(r.json()['detail']['code'],'csrf_expired')
+        self.assertEqual(set(UPLOAD_DIR.glob('*.webp')),before)
+        r=self.client.post('/api/admin/uploads',headers={**self.headers,'Content-Type':'image/png'},content=data.getvalue())
+        self.assertEqual(r.status_code,200);self.assertEqual(len(set(UPLOAD_DIR.glob('*.webp'))-before),1)
+
 if __name__ == '__main__':
     unittest.main()

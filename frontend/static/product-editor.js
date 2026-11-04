@@ -10,10 +10,10 @@ function adminField(name,label,value='',options=''){return `<label>${label}<inpu
 function adminTextArea(name,label,value=''){return `<label>${label}<textarea name="${name}" rows="4">${esc(value)}</textarea></label>`}
 function adminCheck(name,label,checked){return `<label class="editor-active"><input type="checkbox" name="${name}" ${checked?'checked':''}>${label}</label>`}
 function fieldValue(form,name){return form.elements[name].value.trim()}
-function adminDialog(id,title,fields,save){
+function adminDialog(id,title,fields,save,options={}){
  if(document.getElementById(id))return;
  const dialog=document.createElement('dialog');dialog.id=id;dialog.className='admin-dialog';dialog.setAttribute('aria-label',title);
- dialog.innerHTML=`<form class="product-editor-form"><header><h2>${esc(title)}</h2><button type="button" data-editor-close aria-label="Đóng">×</button></header>${fields}<p class="editor-error" role="alert" hidden></p><footer><button type="button" class="btn btn-light" data-editor-close>Hủy</button><button type="submit" class="btn btn-green">Lưu thay đổi</button></footer></form>`;
+ dialog.innerHTML=`<form class="product-editor-form"><header><h2>${esc(title)}</h2><button type="button" data-editor-close aria-label="Đóng">×</button></header>${fields}<p class="editor-error" role="alert" hidden></p><footer><button type="button" class="btn btn-light" data-editor-close>Hủy</button><button type="submit" class="btn ${options.destructive?'btn-coral':'btn-green'}">${esc(options.submitLabel||'Lưu thay đổi')}</button></footer></form>`;
  document.body.appendChild(dialog);let busy=false;
  dialog.querySelectorAll('[data-editor-close]').forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();if(!busy)dialog.close()}));
  dialog.addEventListener('cancel',event=>{if(busy)event.preventDefault()});dialog.addEventListener('close',()=>dialog.remove());
@@ -21,9 +21,9 @@ function adminDialog(id,title,fields,save){
   event.preventDefault();event.stopPropagation();const form=event.currentTarget;if(busy||!form.reportValidity())return;
   const error=dialog.querySelector('.editor-error');error.hidden=true;busy=true;
   dialog.querySelectorAll('button').forEach(x=>x.disabled=true);
-  try{await save(form);dialog.close();await render();toast('Đã lưu thay đổi')}
+  try{await save(form);options.afterSave?.();dialog.close();await render();toast(options.successMessage||'Đã lưu thay đổi')}
   catch(err){error.textContent=err.message;error.hidden=false}
-  finally{busy=false;dialog.querySelectorAll('button').forEach(x=>x.disabled=false)}
+  finally{busy=false;dialog.querySelectorAll('button').forEach(x=>x.disabled=x.hasAttribute('data-locked'))}
  });
  dialog.showModal();return dialog;
 }
@@ -33,7 +33,7 @@ async function openProductEditor(id=null,trigger=null){
  try{if(id){product=(await api('/api/admin/products')).find(p=>p.id===Number(id));if(!product)throw Error('Không tìm thấy sản phẩm')}}catch(err){toast(err.message,'error');return}
  if(document.querySelector('#product-editor'))return;
  const p=product;
- const fields=`<div class="editor-grid">${adminField('sku','SKU',p.sku,`required maxlength="80" ${id?'readonly':''}`)}${id?'':adminField('slug','Đường dẫn (để trống để tạo tự động)',p.slug)}${adminField('name','Tên sản phẩm',p.name,'required minlength="3" maxlength="300"')}${adminField('brand','Thương hiệu',p.brand||'','maxlength="300"')}${adminField('category','Danh mục',p.category,'required list="product-categories"')}<datalist id="product-categories">${CATEGORIES.slice(1).map(x=>`<option value="${esc(x)}">`).join('')}</datalist>${adminField('species','Loài thú cưng',p.species,'required')}${adminField('price_vnd','Giá bán / giá khuyến mãi (₫)',p.price_vnd,'type="number" min="0" step="1" required')}${adminField('compare_price_vnd','Giá gốc gạch ngang (0 nếu không giảm)',p.compare_price_vnd||0,'type="number" min="0" step="1" required')}${adminField('stock','Tồn kho',p.stock,'type="number" min="0" step="1" required')}</div><label>Ảnh sản phẩm (JPEG/PNG/WebP, tối đa 5 MB)<input name="image" type="file" accept="image/jpeg,image/png,image/webp"></label><img class="editor-image" ${p.image_url?`src="${esc(p.image_url)}"`:'hidden'} alt="Xem trước ảnh sản phẩm"><label class="editor-active"><input name="remove_image" type="checkbox">Bỏ ảnh đã tải (dùng ảnh mặc định)</label>${adminTextArea('description','Mô tả sản phẩm',p.description)}${adminTextArea('specifications','Chi tiết / thông số sản phẩm',p.specifications||'')}${adminCheck('active','Đang kinh doanh (giá phải lớn hơn 0)',p.active)}${adminCheck('featured','Sản phẩm nổi bật',p.featured)}<p class="editor-help">Hủy không lưu. Ảnh chỉ được upload khi bấm Lưu. Giá 0 chỉ được lưu ở trạng thái nháp.</p>`;
+ const fields=`<div class="editor-grid">${adminField('sku','SKU',p.sku,`required maxlength="80" ${id?'readonly':''}`)}${id?'':adminField('slug','Đường dẫn (để trống để tạo tự động)',p.slug)}${adminField('name','Tên sản phẩm',p.name,'required minlength="3" maxlength="300"')}${adminField('brand','Thương hiệu',p.brand||'','maxlength="300"')}${adminField('category','Danh mục',p.category,'required list="product-categories"')}<datalist id="product-categories">${CATEGORIES.slice(1).map(x=>`<option value="${esc(x)}">`).join('')}</datalist>${adminField('species','Loài thú cưng',p.species,'required')}${adminField('price_vnd','Giá bán / giá khuyến mãi (₫)',p.price_vnd,'type="number" min="0" step="1" required')}${adminField('compare_price_vnd','Giá gốc gạch ngang (0 nếu không giảm)',p.compare_price_vnd||0,'type="number" min="0" step="1" required')}${adminField('stock','Tồn kho',p.stock,'type="number" min="0" step="1" required')}</div><label>Ảnh sản phẩm (JPEG/PNG/WebP, tối đa 5 MB)<input name="image" type="file" accept="image/jpeg,image/png,image/webp"></label><img class="editor-image" ${p.image_url?`src="${esc(p.image_url)}"`:'hidden'} alt="Xem trước ảnh sản phẩm"><label class="editor-active"><input name="remove_image" type="checkbox">Bỏ ảnh đã tải (dùng ảnh mặc định)</label>${adminTextArea('description','Mô tả sản phẩm',p.description)}${adminTextArea('specifications','Chi tiết / thông số sản phẩm',p.specifications||'')}${adminCheck('active','Đang kinh doanh (giá phải lớn hơn 0)',p.active)}${adminCheck('featured','Sản phẩm nổi bật',p.featured)}${id?`<button type="button" class="btn btn-light" data-delete-product="${p.id}">Xóa sản phẩm…</button>`:''}<p class="editor-help">Hủy không lưu. Ảnh chỉ được upload khi bấm Lưu. Giá 0 chỉ được lưu ở trạng thái nháp.</p>`;
  const dialog=adminDialog('product-editor',id?'Sửa sản phẩm':'Thêm sản phẩm',fields,async form=>{
   const body={};for(const name of ['name','brand','category','species','description','specifications'])body[name]=fieldValue(form,name);
   for(const name of ['price_vnd','compare_price_vnd','stock']){const value=fieldValue(form,name);if(!value||!Number.isInteger(Number(value))||Number(value)<0)throw Error('Nhập giá và tồn kho nguyên, không để trống');body[name]=Number(value)}
@@ -43,10 +43,24 @@ async function openProductEditor(id=null,trigger=null){
   if(!id){body.sku=fieldValue(form,'sku');body.slug=fieldValue(form,'slug')}else body.expected_stock=p.stock;
   body.image_url=form.elements.remove_image.checked?'':p.image_url||'';
   const file=form.elements.image.files?.[0];
-  if(file){if(file.size>5*1024*1024)throw Error('Ảnh tối đa 5 MB');const response=await fetch('/api/admin/uploads',{method:'POST',headers:{'Content-Type':file.type,'X-CSRF-Token':STATE.csrf},credentials:'same-origin',body:file});const data=await response.json();if(!response.ok)throw Error(data.detail||'Upload ảnh thất bại');body.image_url=data.image_url}
+  if(file){if(file.size>5*1024*1024)throw Error('Ảnh tối đa 5 MB');const data=await api('/api/admin/uploads',{method:'POST',headers:{'Content-Type':file.type},body:file});body.image_url=data.image_url}
   await api('/api/admin/products'+(id?'/'+id:''),{method:id?'PATCH':'POST',body:JSON.stringify(body)});
  });
  if(dialog)dialog.querySelector('[name=image]').addEventListener('change',event=>{const file=event.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{const img=dialog.querySelector('.editor-image');img.src=reader.result;img.hidden=false};reader.readAsDataURL(file)});
+}
+async function openProductDeletion(id){
+ try{
+  const p=(await api('/api/admin/products')).find(p=>p.id===Number(id));if(!p)throw Error('Không tìm thấy sản phẩm');
+  const blocked=Number(p.order_count)>0;
+  const fields=`<p><b>${esc(p.name)}</b> · SKU <b>${esc(p.sku)}</b> · ${money(p.price_vnd)} · Tồn ${p.stock}</p>${blocked?'<p class="editor-error" role="alert">Đã có đơn hàng (kể cả đơn hủy): không thể xóa. Hãy chuyển sang Nháp để ẩn khỏi shop.</p>':`<p>Xóa vĩnh viễn sản phẩm khỏi database và danh sách admin/shop. Nhật ký kho được lưu trong bản ghi kiểm toán; ảnh đã upload được giữ lại. Hủy sẽ không xóa.</p>${adminField('confirm_sku','Nhập chính xác SKU để xác nhận','','required autocomplete="off"')}`}`;
+  const dialog=adminDialog('product-delete-confirm','Xác nhận xóa sản phẩm',fields,async form=>{
+   if(blocked)throw Error('Sản phẩm đã có đơn hàng, không thể xóa');
+   const sku=fieldValue(form,'confirm_sku');if(sku!==p.sku)throw Error('SKU xác nhận không khớp; chưa xóa');
+   await api('/api/admin/products/'+p.id,{method:'DELETE',body:JSON.stringify({confirm_sku:sku,expected_stock:p.stock})});
+   STATE.products=STATE.products.filter(x=>x.id!==p.id);
+  },{destructive:true,submitLabel:'Xóa vĩnh viễn',successMessage:'Đã xóa sản phẩm',afterSave:()=>document.querySelector('#product-editor')?.close()});
+  if(blocked&&dialog){const submit=dialog.querySelector('[type=submit]');submit.disabled=true;submit.setAttribute('data-locked','')}
+ }catch(err){toast(err.message,'error')}
 }
 async function openInventoryEditor(id=null){
  try{
