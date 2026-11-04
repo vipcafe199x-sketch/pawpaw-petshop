@@ -1,0 +1,142 @@
+name: Publish v1.2.5
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v1.2.5.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v1.2.5
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8e7fdc2e828171c9e20410e0e550decf254d4174
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: npm ci
+      - run: npm test
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: vipcafe199x-sketch/pawpaw-petshop
+      RELEASE_SHA: 8e7fdc2e828171c9e20410e0e550decf254d4174
+    steps:
+      - name: Publish the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.2.5 >/dev/null 2>&1; then
+            test "$(gh api repos/$GH_REPO/git/ref/tags/v1.2.5 --jq .object.sha)" = "$RELEASE_SHA"
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Gia cố có kiểm chứng
+          - Production không công khai OpenAPI/Swagger; schema riêng chỉ cho admin, dotfile paths trả 404.
+          - Rate limit theo tài khoản/IP và tổng lỗi IP, Retry-After; đăng nhập tài khoản khác không reset lỗi mục tiêu.
+          - Uvicorn không phát Server header; helper Nginx server_tokens off có syntax test/rollback và kiểm tra header công khai khi deploy.
+          - 46 API/database tests + 27 DOM tests: quyền đọc/ghi, CSRF/Origin, ownership danh sách đơn, chống giả giá và khôi phục backup QA.
+
+          ## Phạm vi và giới hạn
+          Không phải kiểm thử xâm nhập toàn diện. MFA chưa bật; lookup khách vãng lai dùng mã+SĐT chưa có OTP; rate limit còn process-local. Hạ tầng/vá OS, auto-renew và backup production chưa được audit đầy đủ.
+          Không thay đổi coupon hay dữ liệu nghiệp vụ khi deploy; kiểm tra lại báo giá PAWPAW10 qua public API, không tạo đơn. Không xuất database/backup vào log.
+          Xem docs/security-v1.2.5.md để phân biệt các kiểm tra đã đạt với phần còn cần làm.
+
+          NOTES
+          gh release create v1.2.5 --target "$RELEASE_SHA" --title "v1.2.5 — Gia cố tài liệu API, đăng nhập và header server" --notes-file release-notes.md --latest
+  deploy:
+    needs: release
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tested commit
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout --detach 8e7fdc2e828171c9e20410e0e550decf254d4174
+      - name: Protect database and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
+          curl -fsS http://127.0.0.1:8001/ | grep -q 'data-build="v1.2.5"'
+          curl -fsS http://127.0.0.1:8001/static/admin.js?v=v1.2.5 -o /tmp/pawpaw-admin-v1.2.5.js
+          test -s /tmp/pawpaw-admin-v1.2.5.js
+      - name: Hide Nginx version with validated configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          security_headers="$(curl -fsS -D - -o /dev/null https://pawpaw-petshop.mooo.com/api/health)"
+          if printf '%s\n' "$security_headers" | grep -Eqi '^server:.*nginx/'; then
+            if [ "$(id -u)" = 0 ]; then
+              python3 /opt/pawpaw/deploy/nginx/harden_server_tokens.py
+            else
+              sudo -n python3 /opt/pawpaw/deploy/nginx/harden_server_tokens.py
+            fi
+          fi
+          version_hidden=0
+          for attempt in 1 2 3 4 5; do
+            security_headers="$(curl -fsS -D - -o /dev/null https://pawpaw-petshop.mooo.com/api/health)"
+            if ! printf '%s\n' "$security_headers" | grep -Eqi '^server:.*(nginx/|uvicorn)'; then
+              version_hidden=1
+              break
+            fi
+            sleep 1
+          done
+          test "$version_hidden" = 1
+          echo 'Public server version check passed'
+      - name: Verify public security boundaries and quote without creating orders
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in /openapi.json /docs /redoc /api/docs /api/openapi.json /.env /.git/config; do
+            result="$(curl -sS -o /dev/null -w '%{http_code}' "https://pawpaw-petshop.mooo.com$path")"
+            test "$result" = 404
+          done
+          result="$(curl -sS -o /dev/null -w '%{http_code}' https://pawpaw-petshop.mooo.com/api/admin/openapi.json)"
+          test "$result" = 401
+          redirect="$(curl -sS -o /dev/null -w '%{http_code}' http://pawpaw-petshop.mooo.com/api/health)"
+          case "$redirect" in 301|302|307|308) ;; *) exit 1 ;; esac
+          echo 'Public schema, sensitive paths, admin guard and HTTPS redirect checks passed'
+          docker exec -i pawpaw python - <<'PY'
+          import httpx
+          with httpx.Client(base_url='http://127.0.0.1:8000',timeout=15) as client:
+              catalog=client.get('/api/products',params={'q':'PuppyCare'}).json()
+              product=next(p for p in catalog if p['slug']=='hat-dinh-duong-puppycare')
+              assert product['price_vnd']==320000
+              token=client.get('/api/csrf').json()['csrfToken']
+              response=client.post('/api/orders/quote',headers={'X-CSRF-Token':token},json={'items':[{'productId':product['id'],'quantity':1}],'coupon':'PAWPAW10'})
+              assert response.status_code==200
+              quote=response.json()
+              assert quote['coupon_terms']['discount_type']=='percent' and quote['coupon_terms']['discount_value']==10
+              assert (quote['discount_vnd'],quote['shipping_vnd'],quote['total_vnd'])==(32000,0,288000)
+          print('Public quote policy verified; no order created')
+          PY
