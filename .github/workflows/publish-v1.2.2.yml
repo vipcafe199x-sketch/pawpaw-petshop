@@ -1,0 +1,93 @@
+name: Publish v1.2.2
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v1.2.2.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v1.2.2
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 74920f60fddbf7a3546af56b3f30e97a00adcfea
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: npm ci
+      - run: npm test
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: vipcafe199x-sketch/pawpaw-petshop
+      RELEASE_SHA: 74920f60fddbf7a3546af56b3f30e97a00adcfea
+    steps:
+      - name: Publish the tested commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v1.2.2 >/dev/null 2>&1; then
+            test "$(gh api repos/$GH_REPO/git/ref/tags/v1.2.2 --jq .object.sha)" = "$RELEASE_SHA"
+            exit 0
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Nguồn dữ liệu và liên hệ cửa hàng
+          - Trang hỗ trợ và các hàm giao diện cũ đọc liên hệ từ settings thật, bỏ hotline/email/địa chỉ mẫu. Không cấu hình thì hiển thị rõ trạng thái thiếu dữ liệu.
+          - Admin ghi rõ nguồn liên hệ; form khuyến mãi hiển thị khoảng ngày lấy từ database, kể cả Không giới hạn.
+          - Đối chiếu lịch sử seed: PP-005 vốn là Đệm ngủ; không có seed bánh thưởng dâu tây hoặc WELCOME10. Không suy diễn absence thành bằng chứng chưa từng tồn tại/xóa.
+          - Công cụ catalog_evidence chạy chỉ đọc tại máy chủ của chủ shop, không tự chạy khi deploy hoặc gửi kết quả lên GitHub.
+          - Hướng dẫn đề xuất SKU riêng cho bánh thưởng và dọn ABC sau khi được xác nhận. Không tự tạo/xóa/ẩn hoặc khôi phục dữ liệu trong release này.
+
+          ## Kiểm chứng
+          30 API/database tests + 19 DOM tests; CI chạy lại trước phát hành. Bao gồm toàn bộ suite v1.2.1 và dữ liệu ngày/liên hệ/snapshot QA.
+          Deploy sao lưu và kiểm tra catalog không đổi, kiểm tra health và build v1.2.2. Chưa kiểm tra trực tiếp Safari/iPhone.
+          Chi tiết: docs/followup-v1.2.2.md. Backup production chưa được quét trong lượt này; kết luận lịch sử vẫn có giới hạn.
+
+          NOTES
+          gh release create v1.2.2 --target "$RELEASE_SHA" --title "v1.2.2 — Làm rõ nguồn dữ liệu và đồng bộ liên hệ cửa hàng" --notes-file release-notes.md --latest
+  deploy:
+    needs: release
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - name: Checkout tested commit
+        run: |
+          git -C /opt/pawpaw fetch --tags origin
+          git -C /opt/pawpaw checkout --detach 74920f60fddbf7a3546af56b3f30e97a00adcfea
+      - name: Protect database and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t pawpaw-petshop /opt/pawpaw
+          docker stop pawpaw
+          trap 'docker start pawpaw >/dev/null 2>&1 || true' ERR
+          docker run --rm --network none --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop python -m backend.deployment_guard --data-root /app/data
+          docker rm pawpaw
+          trap - ERR
+          docker run -d --restart unless-stopped --name pawpaw -p 127.0.0.1:8001:8000 --env-file /opt/pawpaw/.env -v pawpaw-data:/app/data pawpaw-petshop
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -fsS http://127.0.0.1:8001/api/health
+          curl -fsS https://pawpaw-petshop.mooo.com/api/health
+          curl -fsS http://127.0.0.1:8001/ | grep -q 'data-build="v1.2.2"'
+          curl -fsS http://127.0.0.1:8001/static/admin.js?v=v1.2.2 -o /tmp/pawpaw-admin-v1.2.2.js
+          test -s /tmp/pawpaw-admin-v1.2.2.js
