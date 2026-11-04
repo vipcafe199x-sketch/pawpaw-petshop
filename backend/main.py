@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.database import connect, init_db, db_path
+from backend.coupon_dates import coupon_view
 from backend.admin_domain import write_product, promotion_values, catalog_admin, low_threshold, report_data, tier, integer, text, APPOINTMENT_TRANSITIONS
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
 from backend.services.orders import place_order, quote_order, restore_cancelled_stock
@@ -127,7 +128,7 @@ def csrf(response: Response) -> dict[str, str]:
 @app.get("/api/products")
 def products(q: str = "", category: str = "", species: str = "", sort: str = "popular", limit: int = 60) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 100))
-    sql = "SELECT * FROM products WHERE active=1"
+    sql = "SELECT * FROM products WHERE active=1 AND price_vnd>0"
     params: list[Any] = []
     if q.strip():
         sql += " AND (name LIKE ? OR description LIKE ? OR sku LIKE ? OR brand LIKE ?)"
@@ -149,7 +150,7 @@ def products(q: str = "", category: str = "", species: str = "", sort: str = "po
 @app.get("/api/products/{slug}")
 def product_detail(slug: str) -> dict[str, Any]:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM products WHERE slug=? AND active=1", (slug,)).fetchone()
+        row = conn.execute("SELECT * FROM products WHERE slug=? AND active=1 AND price_vnd>0", (slug,)).fetchone()
     if not row:
         raise HTTPException(404, "Không tìm thấy sản phẩm")
     return dict(row)
@@ -450,7 +451,7 @@ def admin_customers(q: str = "", include_archived: bool = False, admin: dict[str
 
 @app.get("/api/admin/promotions")
 def admin_promotions(admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
-    with connect() as conn: return [dict(r) for r in conn.execute("SELECT * FROM coupons ORDER BY code").fetchall()]
+    with connect() as conn: return [coupon_view(r) for r in conn.execute("SELECT * FROM coupons ORDER BY code").fetchall()]
 
 
 @app.post("/api/admin/promotions")
@@ -463,7 +464,7 @@ async def create_promotion(request: Request, admin: dict[str, Any] = Depends(adm
         except Exception as error:
             if 'UNIQUE constraint failed' in str(error): raise HTTPException(409,'Mã ưu đãi đã tồn tại')
             raise
-        return dict(conn.execute('SELECT * FROM coupons WHERE code=?',(values['code'],)).fetchone())
+        return coupon_view(conn.execute('SELECT * FROM coupons WHERE code=?',(values['code'],)).fetchone())
 
 
 @app.patch('/api/admin/promotions/{code}')
@@ -473,8 +474,8 @@ async def update_promotion(code: str, request: Request, admin: dict[str, Any] = 
         current = conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE',(code,)).fetchone()
         if not current: raise HTTPException(404,'Không tìm thấy mã ưu đãi')
         values = promotion_values(await request.json(),current)
-        conn.execute('UPDATE coupons SET '+','.join(k+'=?' for k in values)+' WHERE code=?',list(values.values())+[code])
-        return dict(conn.execute('SELECT * FROM coupons WHERE code=?',(code,)).fetchone())
+        conn.execute('UPDATE coupons SET '+','.join(k+'=?' for k in values)+' WHERE code=? COLLATE NOCASE',list(values.values())+[current['code']])
+        return coupon_view(conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE',(code,)).fetchone())
 
 
 @app.get("/api/admin/appointments")
@@ -516,9 +517,21 @@ async def update_settings(request: Request, admin: dict[str, Any] = Depends(admi
     for key in ("free_shipping_from_vnd","low_stock_threshold"):
         if key in body: body[key] = integer(body[key],0,10000 if key=="low_stock_threshold" else 2147483647)
     with connect() as conn:
-        for k,v in body.items():
-            if k in allowed: conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k,str(v)[:200]))
-        return {r["key"]: r["value"] for r in conn.execute("SELECT key,value FROM settings").fetchall()}
+        clean = {}
+        for key,value in body.items():
+            if key not in allowed: continue
+            value = text(str(value),200)
+            # An empty/unconfigured contact input never erases a stored contact.
+            if key in ('support_phone','support_email','store_address') and not value: continue
+            if key == 'store_name' and not value: raise HTTPException(422,'Tên cửa hàng không được trống')
+            if key == 'support_email' and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',value): raise HTTPException(422,'Email hỗ trợ không hợp lệ')
+            clean[key] = value
+        conn.execute('BEGIN IMMEDIATE')
+        for key,value in clean.items():
+            conn.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
+        conn.commit()
+        return {r['key']:r['value'] for r in conn.execute('SELECT key,value FROM settings')}
+
 
 
 @app.post('/api/admin/uploads')

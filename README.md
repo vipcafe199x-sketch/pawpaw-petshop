@@ -64,3 +64,7 @@ Xem [hướng dẫn kiểm tra, bảo vệ database và sửa dữ liệu cũ](d
 ## v1.2.0 quản trị
 
 Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an toàn](docs/admin-v1.2.0.md). Có form sản phẩm đầy đủ và upload ảnh persistent, điều chỉnh kho có lý do, quản lý mã giảm giá, chi tiết khách hàng, báo cáo theo ngày và tìm kiếm chung. Các tab chưa triển khai đã được ẩn.
+
+## v1.2.1 follow-up
+
+[Hướng dẫn khôi phục production từng bước, dọn ABC an toàn và cách đối soát doanh thu](docs/followup-v1.2.1.md). Shop ẩn nháp/không giá; ngày ưu đãi và liên hệ được bảo vệ khỏi ô trống; báo cáo có phần đối soát và toàn bộ sản phẩm bán chạy.

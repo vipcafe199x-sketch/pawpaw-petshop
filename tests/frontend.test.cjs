@@ -15,20 +15,21 @@ function harness(){
  const report={order_count:1,total_order_count:2,cancelled_count:1,revenue_vnd:100000,order_definition:'Đơn hợp lệ không hủy',granularity:'day',series:[{month:'2050-01-03',revenue:100000,orders:1}],best_sellers:[{product_name:'QA',units:2,revenue:100000}],low_stock:[],low_stock_threshold:5,latest_orders:[order]};
  const promo={code:'QA10',discount_type:'percent',discount_value:10,minimum_vnd:0,usage_limit:10,active:1,used_count:0,starts_at:'',expires_at:''};
  const customer={id:9,full_name:'TEST CUSTOMER',email:'qa@example.invalid',phone:'0000000000',spent_vnd:0,order_count:0,tier:'Thành viên mới',orders:[order],archived:0};
- const switches={rejectStatus:false,quoteError:false};const writes=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
+ const settings={store_name:'QA',low_stock_threshold:5};
+ const switches={publicFilter:false,rejectStatus:false,quoteError:false};const writes=[];const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}};
  let location=new URL('https://qa.test/admin/products');
  const context={window,document,console,Intl,Date,URL,URLSearchParams,Set,Map,Blob,navigator:{},localStorage:storage(),sessionStorage:storage(),setTimeout:()=>1,clearTimeout:()=>{},get location(){return location},history:{pushState:(_,__,url)=>{location=new URL(url,location)}},FormData:class{},fetch:async(url,options={})=>{
   let data;if(url==='/api/orders/quote'){if(switches.quoteError)return {ok:false,json:async()=>({detail:'TEST COUPON INVALID'})};data={subtotal_vnd:400000,discount_vnd:40000,shipping_vnd:0,total_vnd:360000,coupon_code:'TEST10'}}
   else if(options.method==='POST'&&url.startsWith('/api/admin/')){writes.push({url,body:JSON.parse(options.body)});data={ok:true}}
   else if(options.method==='PATCH'){if(url.includes('/orders/')&&switches.rejectStatus)return {ok:false,json:async()=>({detail:'TEST TRANSITION REJECTED'})};writes.push({url,body:JSON.parse(options.body)});data=url.includes('/orders/')?{...order,status:JSON.parse(options.body).status}:{...products[0],...JSON.parse(options.body)}}
-  else if(url==='/api/admin/products'||url.startsWith('/api/products?')||url==='/api/products')data=products;
+  else if(url==='/api/admin/products'||url.startsWith('/api/products?')||url==='/api/products')data=switches.publicFilter&&url!=='/api/admin/products'?products.filter(p=>p.active&&p.price_vnd>0):products;
   else if(url.startsWith('/api/products/'))data=products.find(p=>p.slug===url.split('/').pop());
   else if(url==='/api/admin/orders/7')data=order;
   else if(url.startsWith('/api/admin/dashboard')||url.startsWith('/api/admin/reports'))data=report;
   else if(url==='/api/admin/promotions')data=[promo];
   else if(url==='/api/admin/customers/9')data=customer;
   else if(url.startsWith('/api/admin/customers'))data=[customer];
-  else if(url==='/api/admin/settings')data={store_name:'QA',low_stock_threshold:5};
+  else if(url==='/api/admin/settings')data=settings;
   else if(url==='/api/admin/inventory')data=[];
   else if(url.startsWith('/api/admin/appointments'))data=[{id:4,status:'confirmed',service_type:'vet',service_date:'2050-01-03',time_slot:'10:00',owner_name:'QA',pet_name:'QA',phone:'0000000000'}];
   else if(url.startsWith('/api/admin/search'))data={products,orders:[order],customers:[customer]};
@@ -43,7 +44,7 @@ function harness(){
  const proto=window.HTMLElement.prototype;
  Object.defineProperty(proto,'checked',{get(){return this.hasAttribute('checked')},set(value){this.toggleAttribute('checked',!!value)},configurable:true});
  proto.showModal=function(){this.setAttribute('open','')};proto.close=function(){this.removeAttribute('open');this.dispatchEvent(new window.Event('close'))};
- return {document,window,products,order,writes,switches,run,prepareDialog,navigate:url=>{location=new URL(url,location)}};
+ return {document,window,products,order,writes,switches,promo,settings,report,run,prepareDialog,navigate:url=>{location=new URL(url,location)}};
 }
 
 test('product editor preloads values; cancel and blank submit never write; explicit save writes values',async()=>{
@@ -157,4 +158,29 @@ test('report export is aggregate data, single point is legible, calendar has boo
 
 test('global search Enter navigates to actual search route',async()=>{
  const h=harness();h.run("STATE.user={role:'admin'}");await h.run('render()');const input=h.document.querySelector('#admin-search');assert.ok(input);input.value='QA';const event=new h.window.Event('keydown',{bubbles:true,cancelable:true});event.key='Enter';input.dispatchEvent(event);await tick();await tick();assert.match(h.run('location.pathname+location.search'),/\/admin\/search\?q=QA/);assert.match(h.document.querySelector('.admin-content').textContent,/Kết quả tìm kiếm/);
+});
+
+test('promotion edit preloads Vietnamese and timestamp dates, cancel preserves table dates with zero writes',async()=>{
+ const h=harness();h.run("STATE.user={role:'admin'}");h.promo.starts_at='02/11/2026';h.promo.expires_at='2026-11-30T00:00:00Z';h.navigate('/admin/promotions');await h.run('render()');
+ const before=h.document.querySelector('[data-admin-table]').textContent;assert.match(before,/02\/11\/2026 → 30\/11\/2026/);
+ for(let i=0;i<2;i++){h.document.querySelector('[data-edit-promo]').click();await tick();const {d,form}=h.prepareDialog('promotion-editor');assert.equal(form.elements.starts_at.value,'2026-11-02');assert.equal(form.elements.expires_at.value,'2026-11-30');d.querySelector('[data-editor-close]').click();await h.run('render()');assert.equal(h.document.querySelector('[data-admin-table]').textContent,before)}
+ assert.equal(h.writes.length,0);assert.throws(()=>h.run("couponDateInput('unreadable date')"));
+});
+
+test('settings displays actual contacts, missing contacts are optional and explain blank preservation',async()=>{
+ const h=harness();h.run("STATE.user={role:'admin'}");h.navigate('/admin/settings');await h.run('render()');
+ for(const key of ['support_phone','support_email','store_address'])assert.equal(h.document.querySelector(`[name=${key}]`).hasAttribute('required'),false);
+ Object.assign(h.settings,{support_phone:'0000000000',support_email:'qa@example.invalid',store_address:'QA ADDRESS'});await h.run('render()');for(const key of ['support_phone','support_email','store_address'])assert.equal(h.document.querySelector(`[name=${key}]`).value,h.settings[key]);
+ assert.match(h.document.querySelector('#settings-form').textContent,/trống không xóa dữ liệu đã lưu/);
+});
+
+test('public shop, home and favorites render only catalog entries returned as published and priced',async()=>{
+ const h=harness();h.switches.publicFilter=true;h.products.push({...h.products[0],id:11,name:'QA DRAFT HIDDEN',slug:'qa-draft',active:0});h.run('STATE.favorite=new Set([6,10,11])');
+ for(const expression of ['home()','shop()','favorites()']){const html=await h.run(expression);assert.doesNotMatch(html,/TEST UNPRICED PRODUCT|QA DRAFT HIDDEN/);assert.match(html,/TEST PRODUCT/)}
+});
+
+test('report reconciliation and CSV include explicit financial bridge and legacy discrepancy warning',async()=>{
+ const h=harness();h.run("STATE.user={role:'admin'}");h.report.reconciliation={items_gross_vnd:90000,subtotal_vnd:91000,discount_vnd:1000,shipping_vnd:10000,subtotal_difference_vnd:1000,total_difference_vnd:0,recorded_total_vnd:100000,orders_needing_review:[{order_code:'QA-GAP',subtotal_difference_vnd:1000,total_difference_vnd:0}]};h.navigate('/admin/reports');await h.run('render()');
+ const section=h.document.querySelector('.report-reconciliation');assert.match(section.textContent,/1 đơn lịch sử cần đối soát/);assert.match(section.textContent,/Giảm giá \(trừ\)/);assert.match(section.textContent,/Phí giao hàng \(cộng\)/);assert.match(section.textContent,/100\.000/);assert.match(h.document.querySelector('thead').textContent,/trước giảm \/ phí ship/);
+ const csv=h.run('reportCsvRows(STATE.adminReport)');assert.ok(csv.some(r=>r.section==='reconciliation'&&r.label==='subtotal_difference_vnd'&&r.revenue_vnd===1000));
 });

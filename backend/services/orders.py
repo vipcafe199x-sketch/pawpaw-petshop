@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from backend.database import connect
+from backend.coupon_dates import coupon_view
 
 
 def shipping_fee(subtotal: int, free_shipping_from: int) -> int:
@@ -48,6 +49,7 @@ def calculate_quote(conn, items, coupon_code=''):
     discount = 0
     if coupon_code:
         coupon = conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE AND active=1', (coupon_code,)).fetchone()
+        coupon = coupon_view(coupon) if coupon else None
         not_started = bool(coupon and coupon['starts_at'] and str(coupon['starts_at']) > datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date().isoformat())
         expired = bool(coupon and coupon['expires_at'] and str(coupon['expires_at']) < datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date().isoformat())
         if not coupon or not_started or expired or (coupon['usage_limit'] and coupon['used_count'] >= coupon['usage_limit']) or subtotal < coupon['minimum_vnd']:

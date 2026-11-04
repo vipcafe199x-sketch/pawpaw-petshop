@@ -56,7 +56,8 @@ class PawPawApiTests(unittest.TestCase):
             'coupon': coupon, 'paymentMethod': payment})
 
     def stock(self, product):
-        return self.client.get('/api/products/' + product['slug']).json()['stock']
+        with connect() as conn:
+            return conn.execute('SELECT stock FROM products WHERE id=?',(product['id'],)).fetchone()['stock']
 
     def test_health_catalog_search_sort(self):
         p = self.product()
@@ -421,6 +422,84 @@ class PawPawApiTests(unittest.TestCase):
         response = self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'expected_stock':p['stock'],'stock':p['stock'],'name':'QA STALE'})
         self.assertEqual(response.status_code,409)
         self.assertEqual(self.stock(p),p['stock']+2)
+
+
+    def test_public_shop_hides_drafts_unpriced_but_keeps_sold_out(self):
+        draft,unpriced,soldout = self.product(),self.product(),self.product()
+        with connect() as conn:
+            conn.execute('UPDATE products SET active=0 WHERE id=?',(draft['id'],))
+            conn.execute('UPDATE products SET price_vnd=0 WHERE id=?',(unpriced['id'],))
+            conn.execute('UPDATE products SET stock=0 WHERE id=?',(soldout['id'],))
+        for p in (draft,unpriced):
+            self.assertEqual(self.client.get('/api/products',params={'q':p['sku']}).json(),[])
+            self.assertEqual(self.client.get('/api/products/'+p['slug']).status_code,404)
+            self.assertEqual(self.order(p).status_code,422)
+            self.assertTrue(any(r['id']==p['id'] for r in self.client.get('/api/admin/products').json()))
+        self.assertEqual(self.client.get('/api/products',params={'q':soldout['sku']}).json()[0]['stock'],0)
+
+    def test_coupon_dates_preserved_on_read_cancel_equivalent_and_unrelated_patch(self):
+        code='QA-'+secrets.token_hex(6).upper()
+        with connect() as conn:
+            conn.execute("INSERT INTO coupons(code,discount_type,discount_value,starts_at,expires_at) VALUES(?,'percent',10,?,?)",(code,'02/11/2026','2026-11-30T00:00:00Z'))
+        def read(): return next(p for p in self.client.get('/api/admin/promotions').json() if p['code']==code)
+        for _ in range(3):
+            p=read();self.assertEqual(p['starts_at'],'2026-11-02');self.assertEqual(p['expires_at'],'2026-11-30')
+        with connect() as conn:
+            self.assertEqual(conn.execute('SELECT starts_at FROM coupons WHERE code=?',(code,)).fetchone()[0],'02/11/2026')
+        url='/api/admin/promotions/'+code.lower()
+        r=self.client.patch(url,headers=self.headers,json={'discount_value':12})
+        self.assertEqual(r.status_code,200,r.text);self.assertEqual(read()['expires_at'],'2026-11-30')
+        self.assertEqual(self.client.patch(url,headers=self.headers,json={'starts_at':'','expires_at':''}).status_code,422)
+        self.assertEqual(read()['starts_at'],'2026-11-02')
+        r=self.client.patch(url,headers=self.headers,json={'clear_dates':1,'starts_at':'','expires_at':''})
+        self.assertEqual(r.status_code,200);self.assertEqual(read()['starts_at'],'')
+
+    def test_settings_hydrate_contacts_and_blank_inputs_cannot_erase(self):
+        values={'support_phone':'0000000000','support_email':'qa@example.invalid','store_address':'QA ADDRESS'}
+        r=self.client.patch('/api/admin/settings',headers=self.headers,json=values)
+        self.assertEqual(r.status_code,200,r.text)
+        settings=self.client.get('/api/admin/settings').json()
+        for k,v in values.items(): self.assertEqual(settings[k],v)
+        r=self.client.patch('/api/admin/settings',headers=self.headers,json={k:'' for k in values})
+        for k,v in values.items(): self.assertEqual(r.json()[k],v)
+        self.assertEqual(self.client.patch('/api/admin/settings',headers=self.headers,json={'store_name':''}).status_code,422)
+        self.assertEqual(self.client.patch('/api/admin/settings',headers=self.headers,json={'support_email':'invalid'}).status_code,422)
+
+    def test_explicit_repair_applies_publishes_once_without_touching_others(self):
+        broken,other=self.product(),self.product()
+        with connect() as conn: conn.execute('UPDATE products SET price_vnd=0,stock=0,active=0 WHERE id=?',(broken['id'],))
+        kwargs={'product_repairs':{broken['sku']:(broken['price_vnd'],broken['stock'])},'include_defaults':False,'activate_repaired':True}
+        preview=repair_reported_data(**kwargs)
+        self.assertEqual(len(preview['actions']),1);self.assertEqual(self.stock(broken),0)
+        applied=repair_reported_data(apply=True,**kwargs)
+        self.assertTrue(Path(applied['backup']).exists())
+        self.assertEqual(self.client.get('/api/products/'+broken['slug']).json()['price_vnd'],broken['price_vnd'])
+        self.assertEqual(self.stock(broken),broken['stock']);self.assertEqual(self.stock(other),other['stock'])
+        with connect() as conn: before=conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(broken['id'],)).fetchone()[0]
+        repair_reported_data(apply=True,**kwargs)
+        with connect() as conn: self.assertEqual(conn.execute('SELECT COUNT(*) FROM inventory_events WHERE product_id=?',(broken['id'],)).fetchone()[0],before)
+
+    def test_revenue_reconciles_all_products_discounts_shipping_and_legacy_gaps(self):
+        ids=[]
+        for _ in range(9):
+            p=self.product();ids.append(self.order(p).json()['id'])
+        cancelled=self.order(self.product()).json()
+        self.client.patch(f"/api/admin/orders/{cancelled['id']}",headers=self.headers,json={'status':'cancelled'})
+        with connect() as conn:
+            for oid in ids+[cancelled['id']]: conn.execute('UPDATE orders SET created_at=? WHERE id=?',('2058-03-01T00:00:00Z',oid))
+            conn.execute('UPDATE orders SET discount_vnd=1000,total_vnd=subtotal_vnd-1000+shipping_vnd WHERE id=?',(ids[0],))
+        url='/api/admin/reports?start=2058-03-01&end=2058-03-01'
+        data=self.client.get(url).json();x=data['reconciliation']
+        self.assertEqual(len(data['best_sellers']),9);self.assertEqual(data['order_count'],9);self.assertEqual(data['cancelled_count'],1)
+        self.assertEqual(sum(p['revenue'] for p in data['best_sellers']),x['items_gross_vnd'])
+        self.assertEqual(x['items_gross_vnd']-x['discount_vnd']+x['shipping_vnd'],data['revenue_vnd'])
+        self.assertEqual(x['orders_needing_review'],[])
+        with connect() as conn:
+            conn.execute('DELETE FROM order_items WHERE order_id=?',(ids[1],))
+            conn.execute('UPDATE orders SET total_vnd=total_vnd+7 WHERE id=?',(ids[2],))
+        data=self.client.get(url).json();x=data['reconciliation']
+        self.assertEqual(x['items_gross_vnd']+x['subtotal_difference_vnd']-x['discount_vnd']+x['shipping_vnd']+x['total_difference_vnd'],data['revenue_vnd'])
+        self.assertEqual(len(x['orders_needing_review']),2);self.assertEqual(x['total_difference_vnd'],7)
 
 if __name__ == '__main__':
     unittest.main()

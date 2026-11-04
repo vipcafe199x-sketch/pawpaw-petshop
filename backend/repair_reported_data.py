@@ -15,7 +15,8 @@ from backend.services.orders import restore_cancelled_stock
 
 
 def repair_reported_data(apply: bool = False, cancelled_codes: list[str] | None = None,
-                         product_repairs=None, price_repairs=None, rewind_codes=None) -> dict:
+                         product_repairs=None, price_repairs=None, rewind_codes=None,
+                         include_defaults=True, activate_repaired=False) -> dict:
     path = db_path()
     if not path.is_file():
         raise ValueError(f"Không tìm thấy database: {path}")
@@ -29,15 +30,15 @@ def repair_reported_data(apply: bool = False, cancelled_codes: list[str] | None 
                 conn.backup(destination)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            repairs = {"PP-006": (79000, 42), "PP-007": (89000, 24)}
+            repairs = {"PP-006": (79000, 42), "PP-007": (89000, 24)} if include_defaults else {}
             repairs.update(product_repairs or {})
             for sku, (price, stock) in repairs.items():
                 if not isinstance(price, int) or not isinstance(stock, int) or price <= 0 or stock < 0:
                     raise ValueError('Giá phải dương, tồn kho phải không âm')
                 row = conn.execute("SELECT * FROM products WHERE sku=?", (sku,)).fetchone()
                 if row and row["price_vnd"] == 0 and row["stock"] == 0:
-                    actions.append({"sku": sku, "before": {"price_vnd": 0, "stock": 0}, "after": {"price_vnd": price, "stock": stock}})
-                    conn.execute("UPDATE products SET price_vnd=?,stock=? WHERE id=?", (price, stock, row["id"]))
+                    actions.append({"sku": sku, "name": row["name"], "slug": row["slug"], "before": {"price_vnd": 0, "stock": 0,"active":row["active"]}, "after": {"price_vnd": price, "stock": stock,"active":1 if activate_repaired else row["active"]}})
+                    conn.execute("UPDATE products SET price_vnd=?,stock=?,active=? WHERE id=?", (price, stock, 1 if activate_repaired else row["active"], row["id"]))
                     conn.execute("INSERT INTO inventory_events(product_id,delta,reason) VALUES(?,?,?)", (row["id"], stock, f"Khôi phục lỗi prompt: {sku}"))
                 else:
                     actions.append({"sku": sku, "skipped": "Không tồn tại hoặc không còn đồng thời giá/tồn bằng 0"})
@@ -53,7 +54,7 @@ def repair_reported_data(apply: bool = False, cancelled_codes: list[str] | None 
                 else:
                     actions.append({'sku': sku, 'skipped': 'Giá đã khác 0; không ghi đè'})
             row = conn.execute("SELECT id FROM products WHERE sku='PP-010' AND price_vnd=0 AND active=1").fetchone()
-            if row:
+            if row and include_defaults:
                 actions.append({"sku": "PP-010", "after": {"active": 0}, "reason": "Chưa có giá bán"})
                 conn.execute("UPDATE products SET active=0 WHERE id=?", (row["id"],))
             for code in dict.fromkeys(cancelled_codes or []):
@@ -93,14 +94,21 @@ def main():
     parser.add_argument('--repair-product', action='append', default=[], metavar='SKU:PRICE:STOCK', help='Chỉ sửa khi giá và tồn đồng thời bằng 0')
     parser.add_argument('--price-product', action='append', default=[], metavar='SKU:PRICE', help='Đặt giá và bật bán khi giá hiện tại bằng 0; giữ nguyên tồn')
     parser.add_argument('--rewind-preparing-order', action='append', default=[], metavar='CODE', help='Chỉnh đơn test preparing về confirmed khi chưa có mã vận đơn')
+    parser.add_argument('--only-explicit-products', action='store_true', help='Không sửa SKU mặc định hoặc PP-010; chỉ các SKU được chỉ định')
+    parser.add_argument('--activate-repaired', action='store_true', help='Bật bán lại đúng các sản phẩm giá/tồn 0 đã sửa thành công')
+    parser.add_argument('--catalog', action='store_true', help='Chỉ đọc SKU/tên/slug/giá/tồn/trạng thái hiện tại; không sửa')
     args = parser.parse_args()
+    if args.catalog:
+        with connect() as conn:
+            print(json.dumps([dict(r) for r in conn.execute('SELECT sku,name,slug,price_vnd,stock,active FROM products ORDER BY sku')],ensure_ascii=False,indent=2))
+        return
     try:
         products = {}; prices = {}
         for entry in args.repair_product:
             sku, price, stock = entry.split(':'); products[sku] = (int(price), int(stock))
         for entry in args.price_product:
             sku, price = entry.split(':'); prices[sku] = int(price)
-        print(json.dumps(repair_reported_data(args.apply, args.restore_cancelled_order, products, prices, args.rewind_preparing_order), ensure_ascii=False, indent=2))
+        print(json.dumps(repair_reported_data(args.apply, args.restore_cancelled_order, products, prices, args.rewind_preparing_order, not args.only_explicit_products, args.activate_repaired), ensure_ascii=False, indent=2))
     except ValueError as error:
         parser.exit(1, f"{error}\n")
 

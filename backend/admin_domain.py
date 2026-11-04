@@ -5,6 +5,7 @@ import re
 import unicodedata
 from fastapi import HTTPException
 from backend.database import connect
+from backend.coupon_dates import coupon_date, coupon_view
 
 BUSINESS_ZONE = ZoneInfo('Asia/Ho_Chi_Minh')
 ORDER_TRANSITIONS = {'pending': ['confirmed','cancelled'], 'confirmed':['preparing','cancelled'], 'preparing':['shipping','cancelled'], 'shipping':['delivered'], 'delivered':[], 'cancelled':[]}
@@ -81,7 +82,7 @@ def write_product(body, admin_id, product_id=None):
             raise
 
 def promotion_values(body, current=None):
-    values=dict(current) if current else {'discount_type':'percent','minimum_vnd':0,'usage_limit':0,'active':1,'starts_at':'','expires_at':''}
+    values=coupon_view(current) if current else {'discount_type':'percent','minimum_vnd':0,'usage_limit':0,'active':1,'starts_at':'','expires_at':''}
     values.update({k:v for k,v in body.items() if k in {'code','discount_type','discount_value','minimum_vnd','usage_limit','active','starts_at','expires_at'}})
     values['code']=text(values.get('code',''),40).upper()
     if not re.fullmatch(r'[A-Z0-9_-]{4,40}',values['code']): raise HTTPException(422,'Mã cần 4–40 ký tự chữ/số/gạch ngang')
@@ -91,10 +92,9 @@ def promotion_values(body, current=None):
     for key in ('minimum_vnd','usage_limit'): values[key]=integer(values[key])
     values['active']=integer(values['active'],0,1)
     for key in ('starts_at','expires_at'):
-        values[key]=str(values.get(key) or '').strip()
-        try:
-            if values[key]: date.fromisoformat(values[key])
-        except ValueError: raise HTTPException(422,'Ngày ưu đãi không hợp lệ')
+        values[key]=coupon_date(values.get(key))
+        if current and coupon_date(current[key]) and key in body and not values[key] and body.get('clear_dates') != 1:
+            raise HTTPException(422,'Để bỏ ngày đã lưu, cần chọn xác nhận Bỏ giới hạn ngày')
     if values['starts_at'] and values['expires_at'] and values['starts_at']>values['expires_at']: raise HTTPException(422,'Ngày kết thúc phải từ ngày bắt đầu')
     if current and values['usage_limit'] and values['usage_limit']<current['used_count']: raise HTTPException(422,'Giới hạn không thể nhỏ hơn số lượt đã dùng')
     return {k:values[k] for k in ('code','discount_type','discount_value','minimum_vnd','usage_limit','active','starts_at','expires_at')}
@@ -116,7 +116,7 @@ def report_data(start='',end='',granularity='day'):
     if a: where+=" AND date(created_at,'+7 hours')>=?";params.append(a.isoformat())
     if b: where+=" AND date(created_at,'+7 hours')<=?";params.append(b.isoformat())
     with connect() as conn:
-        orders=[dict(o) for o in conn.execute('SELECT id,total_vnd,status,created_at FROM orders'+where+' ORDER BY created_at',params)]
+        orders=[dict(o) for o in conn.execute('SELECT id,order_code,subtotal_vnd,discount_vnd,shipping_vnd,total_vnd,status,created_at FROM orders'+where+' ORDER BY created_at',params)]
         customers=conn.execute("SELECT COUNT(*) n FROM users"+where+" AND role='customer' AND archived=0",params).fetchone()['n']
         valid=[o for o in orders if o['status']!='cancelled'];buckets={};months={}
         for order in valid:
@@ -127,6 +127,23 @@ def report_data(start='',end='',granularity='day'):
                 row=mapping.setdefault(label,{'month':label,'revenue':0,'orders':0});row['revenue']+=order['total_vnd'];row['orders']+=1
         ids=[o['id'] for o in valid];best=[]
         if ids:
-            best=[dict(r) for r in conn.execute('SELECT product_name,SUM(quantity) units,SUM(unit_price_vnd*quantity) revenue FROM order_items WHERE order_id IN ('+','.join('?' for _ in ids)+') GROUP BY product_name ORDER BY units DESC LIMIT 8',ids)]
+            best=[dict(r) for r in conn.execute('SELECT product_name,SUM(quantity) units,SUM(unit_price_vnd*quantity) revenue FROM order_items WHERE order_id IN ('+','.join('?' for _ in ids)+') GROUP BY product_name ORDER BY units DESC,product_name',ids)]
+        reconciliation = {
+            'items_gross_vnd':sum(r['revenue'] for r in best),
+            'subtotal_vnd':sum(o['subtotal_vnd'] for o in valid),
+            'discount_vnd':sum(o['discount_vnd'] for o in valid),
+            'shipping_vnd':sum(o['shipping_vnd'] for o in valid),
+            'recorded_total_vnd':sum(o['total_vnd'] for o in valid),
+        }
+        reconciliation['subtotal_difference_vnd']=reconciliation['subtotal_vnd']-reconciliation['items_gross_vnd']
+        reconciliation['total_difference_vnd']=reconciliation['recorded_total_vnd']-(reconciliation['subtotal_vnd']-reconciliation['discount_vnd']+reconciliation['shipping_vnd'])
+        reconciliation['orders_needing_review']=[]
+        item_totals={r['order_id']:r['gross'] for r in conn.execute('SELECT order_id,SUM(unit_price_vnd*quantity) gross FROM order_items GROUP BY order_id')}
+        for order in valid:
+            gross=item_totals.get(order['id'],0)
+            subtotal_delta=order['subtotal_vnd']-gross
+            total_delta=order['total_vnd']-(order['subtotal_vnd']-order['discount_vnd']+order['shipping_vnd'])
+            if subtotal_delta or total_delta:
+                reconciliation['orders_needing_review'].append({'order_code':order['order_code'],'items_gross_vnd':gross,'subtotal_difference_vnd':subtotal_delta,'total_difference_vnd':total_delta})
         returns_count=conn.execute('SELECT COUNT(*) n FROM returns'+(' WHERE order_id IN ('+','.join('?' for _ in ids)+')' if ids else ' WHERE 0'),ids).fetchone()['n']
-    return {'start':start,'end':end,'granularity':granularity,'series':list(buckets.values()),'months':list(months.values()),'best_sellers':best,'returns_count':returns_count,'revenue_vnd':sum(o['total_vnd'] for o in valid),'order_count':len(valid),'total_order_count':len(orders),'cancelled_count':len(orders)-len(valid),'customer_count':customers,'pending_count':sum(o['status']=='pending' for o in valid),'order_definition':'Đơn hợp lệ = tất cả trạng thái trừ đã hủy; doanh thu gồm tổng tiền các đơn hợp lệ.'}
+    return {'start':start,'end':end,'granularity':granularity,'series':list(buckets.values()),'months':list(months.values()),'best_sellers':best,'reconciliation':reconciliation,'returns_count':returns_count,'revenue_vnd':sum(o['total_vnd'] for o in valid),'order_count':len(valid),'total_order_count':len(orders),'cancelled_count':len(orders)-len(valid),'customer_count':customers,'pending_count':sum(o['status']=='pending' for o in valid),'order_definition':'Đơn hợp lệ = tất cả trạng thái trừ đã hủy; doanh thu = tiền hàng − giảm giá + phí giao hàng. Dùng tổng tiền đã lưu của đơn; dữ liệu lịch sử lệch được cảnh báo đối soát.'}
