@@ -68,3 +68,7 @@ Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an to
 ## v1.2.1 follow-up
 
 [Hướng dẫn khôi phục production từng bước, dọn ABC an toàn và cách đối soát doanh thu](docs/followup-v1.2.1.md). Shop ẩn nháp/không giá; ngày ưu đãi và liên hệ được bảo vệ khỏi ô trống; báo cáo có phần đối soát và toàn bộ sản phẩm bán chạy.
+
+## v1.2.2 nguồn dữ liệu
+
+[Làm rõ PP-005, sản phẩm bánh thưởng, WELCOME10, liên hệ thật và ABC](docs/followup-v1.2.2.md). Trang hỗ trợ dùng settings, bỏ liên hệ mẫu. Công cụ `python -m backend.catalog_evidence` chạy chỉ đọc tại máy chủ của chủ shop để đối chiếu backup; không tự tạo/xóa/khôi phục dữ liệu.

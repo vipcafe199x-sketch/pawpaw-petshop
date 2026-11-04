@@ -184,3 +184,16 @@ test('report reconciliation and CSV include explicit financial bridge and legacy
  const section=h.document.querySelector('.report-reconciliation');assert.match(section.textContent,/1 đơn lịch sử cần đối soát/);assert.match(section.textContent,/Giảm giá \(trừ\)/);assert.match(section.textContent,/Phí giao hàng \(cộng\)/);assert.match(section.textContent,/100\.000/);assert.match(h.document.querySelector('thead').textContent,/trước giảm \/ phí ship/);
  const csv=h.run('reportCsvRows(STATE.adminReport)');assert.ok(csv.some(r=>r.section==='reconciliation'&&r.label==='subtotal_difference_vnd'&&r.revenue_vnd===1000));
 });
+
+test('public support uses configured store contacts, no hardcoded design contacts, and escapes data',()=>{
+ const h=harness();let html=h.run('support()');assert.match(html,/liên hệ chưa được cửa hàng cấu hình/);assert.doesNotMatch(html,/1900|support@pawpaw.vn|tel:/);
+ h.run("syncStoreSettings({support_phone:'0000000000',support_email:'qa@example.invalid',store_address:'<QA ADDRESS>',free_shipping_from_vnd:'400000'})");
+ html=h.run('support()');assert.match(html,/tel:0000000000/);assert.match(html,/qa@example.invalid/);assert.match(html,/&lt;QA ADDRESS&gt;/);assert.equal(h.run('STATE.freeShippingFrom'),400000);
+ assert.doesNotMatch(h.run('footer()'),/1900|support@pawpaw.vn|Trần Thái Tông/);
+ h.run("syncStoreSettings({support_phone:'not a phone'})");assert.doesNotMatch(h.run('contactPhoneButton()'),/href=/);
+});
+
+test('promotion dialog discloses actual database dates and explicitly explains unlimited dates',async()=>{
+ const h=harness();h.promo.starts_at='2027-01-02';h.promo.expires_at='2027-01-31';await h.run("openPromotionEditor('QA10')");let {d,form}=h.prepareDialog('promotion-editor');assert.equal(form.elements.starts_at.value,'2027-01-02');assert.match(d.querySelector('[data-promotion-date-source]').textContent,/02\/01\/2027 → 31\/01\/2027/);d.querySelector('[data-editor-close]').click();
+ h.promo.starts_at='';h.promo.expires_at='';await h.run("openPromotionEditor('QA10')");({d,form}=h.prepareDialog('promotion-editor'));assert.equal(form.elements.expires_at.value,'');assert.match(d.querySelector('[data-promotion-date-source]').textContent,/Không giới hạn → Không giới hạn/);assert.equal(h.writes.length,0);
+});

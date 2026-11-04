@@ -501,5 +501,32 @@ class PawPawApiTests(unittest.TestCase):
         self.assertEqual(x['items_gross_vnd']+x['subtotal_difference_vnd']-x['discount_vnd']+x['shipping_vnd']+x['total_difference_vnd'],data['revenue_vnd'])
         self.assertEqual(len(x['orders_needing_review']),2);self.assertEqual(x['total_difference_vnd'],7)
 
+
+    def test_local_snapshot_evidence_is_read_only_and_reports_history_without_inference(self):
+        import hashlib
+        import sqlite3
+        from backend.database import SCHEMA_PATH
+        from backend.catalog_evidence import evidence
+        with tempfile.TemporaryDirectory(prefix='pawpaw-evidence-qa-') as directory:
+            root=Path(directory);current=root/'qa.sqlite3'
+            with sqlite3.connect(current) as conn:
+                conn.executescript(SCHEMA_PATH.read_text())
+                conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,stock,sku) VALUES('qa-bed','QA BED','QA','QA',100,2,'PP-005')")
+            backups=root/'deploy-backups';backups.mkdir();backup=backups/'qa-history.sqlite3'
+            with sqlite3.connect(current) as source,sqlite3.connect(backup) as target: source.backup(target)
+            with sqlite3.connect(backup) as conn:
+                conn.execute("INSERT INTO coupons(code,discount_type,discount_value,expires_at) VALUES('WELCOME10','percent',10,'2050-01-31')")
+                conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,stock,sku) VALUES('qa-treat','QA Bánh thưởng dâu tây','QA','QA',101,3,'QA-TREAT')")
+                conn.execute("INSERT INTO settings(key,value) VALUES('support_email','qa@example.invalid')")
+            def hashes(): return [hashlib.sha256(p.read_bytes()).hexdigest() for p in (current,backup)]
+            before=hashes();result=evidence(current)
+            self.assertEqual(hashes(),before);self.assertEqual(result['backups_scanned'],1)
+            live,historical=result['snapshots'];self.assertEqual(live['pp005'][0]['name'],'QA BED')
+            self.assertEqual(live['strawberry_matches'],[]);self.assertEqual(len(historical['strawberry_matches']),1)
+            self.assertEqual(historical['coupons'][0]['code'],'WELCOME10')
+            self.assertTrue(historical['contacts_configured']['support_email']);self.assertNotIn('qa@example.invalid',str(result))
+            self.assertIn('cannot prove',result['limitation'])
+            self.assertTrue(evidence(current,limit=0)['truncated'])
+
 if __name__ == '__main__':
     unittest.main()
