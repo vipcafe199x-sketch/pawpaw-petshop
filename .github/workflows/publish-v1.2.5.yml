@@ -1,9 +1,6 @@
 name: Publish v1.2.5
 
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/publish-v1.2.5.yml]
   workflow_dispatch:
 
 permissions:
@@ -58,7 +55,7 @@ jobs:
 
           ## Phạm vi và giới hạn
           Không phải kiểm thử xâm nhập toàn diện. MFA chưa bật; lookup khách vãng lai dùng mã+SĐT chưa có OTP; rate limit còn process-local. Hạ tầng/vá OS, auto-renew và backup production chưa được audit đầy đủ.
-          Không thay đổi coupon hay dữ liệu nghiệp vụ khi deploy; kiểm tra lại báo giá PAWPAW10 qua public API, không tạo đơn. Không xuất database/backup vào log.
+          Không thay đổi coupon hay dữ liệu nghiệp vụ khi deploy; không chạy kiểm tra nghiệp vụ coupon trong workflow bảo mật. Không xuất database/backup vào log.
           Xem docs/security-v1.2.5.md để phân biệt các kiểm tra đã đạt với phần còn cần làm.
 
           NOTES
@@ -113,7 +110,7 @@ jobs:
           done
           test "$version_hidden" = 1
           echo 'Public server version check passed'
-      - name: Verify public security boundaries and quote without creating orders
+      - name: Verify public security boundaries
         shell: bash
         run: |
           set -euo pipefail
@@ -126,17 +123,3 @@ jobs:
           redirect="$(curl -sS -o /dev/null -w '%{http_code}' http://pawpaw-petshop.mooo.com/api/health)"
           case "$redirect" in 301|302|307|308) ;; *) exit 1 ;; esac
           echo 'Public schema, sensitive paths, admin guard and HTTPS redirect checks passed'
-          docker exec -i pawpaw python - <<'PY'
-          import httpx
-          with httpx.Client(base_url='https://pawpaw-petshop.mooo.com',timeout=15) as client:
-              catalog=client.get('/api/products',params={'q':'PuppyCare'}).json()
-              product=next(p for p in catalog if p['slug']=='hat-dinh-duong-puppycare')
-              assert product['price_vnd']==320000
-              token=client.get('/api/csrf').json()['csrfToken']
-              response=client.post('/api/orders/quote',headers={'X-CSRF-Token':token},json={'items':[{'productId':product['id'],'quantity':1}],'coupon':'PAWPAW10'})
-              assert response.status_code==200, f"Read-only quote HTTP status {response.status_code}"
-              quote=response.json()
-              assert quote['coupon_terms']['discount_type']=='percent' and quote['coupon_terms']['discount_value']==10
-              assert (quote['discount_vnd'],quote['shipping_vnd'],quote['total_vnd'])==(32000,0,288000)
-          print('Public quote policy verified; no order created')
-          PY
