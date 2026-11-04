@@ -748,6 +748,12 @@ print('isolated production security checks passed')
         small=FailedLoginLimiter(capacity=4)
         for i in range(20): small.failure('QA-IP-'+str(i),'QA')
         self.assertLessEqual(len(small.buckets),4)
+        long_email='QA-'+('a'*10000)+'@example.invalid'
+        small.failure('QA-LONG-IP',long_email)
+        keys=[key for key in small.buckets if key[0]=='account']
+        self.assertTrue(keys)
+        self.assertTrue(all(isinstance(key[2],bytes) and len(key[2])==32 for key in keys))
+        self.assertNotIn(long_email,str(small.buckets))
 
     def test_login_endpoint_rate_limit_and_retry_after_in_isolated_limiter(self):
         from unittest.mock import patch
