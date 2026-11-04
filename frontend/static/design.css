@@ -171,19 +171,6 @@ body {background:radial-gradient(ellipse at 30% 0,#f9f6ef,#f1ede5);font-family:'
  .recent-orders .table-scroll{width:100%;overflow-x:auto}
 }
 
-/* Product editing is an explicit, cancellable form on desktop and mobile. */
-#product-editor{width:min(520px,calc(100vw - 24px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid var(--line);border-radius:16px;background:#fffdf7;color:var(--ink);padding:22px;box-shadow:0 20px 70px #123b3540}
-#product-editor::backdrop{background:#183b3577}
-.product-editor-form header,.product-editor-form footer{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.product-editor-form header h2{margin:0;font-size:22px}
-.product-editor-form header button{border:0;background:transparent;font-size:28px;color:var(--green);min-width:40px;min-height:40px}
-.product-editor-form label{display:grid;gap:7px;font-size:13px;margin:14px 0}
-.product-editor-form input:not([type=checkbox]){width:100%;min-width:0;height:44px;border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;background:white;color:var(--ink)}
-.editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.product-editor-form .editor-active{display:flex;align-items:center;gap:8px}
-.product-editor-form .editor-active input{min-height:0;width:18px;height:18px;accent-color:var(--green)}
-.editor-help,.shipping-policy{font-size:11px;line-height:1.6;color:#52675f}
-.editor-error{color:#b62735;font-size:13px}
-@media(max-width:480px){#product-editor{padding:16px}.editor-grid{grid-template-columns:1fr;gap:0}.product-editor-form input:not([type=checkbox]){font-size:16px}}
+.shipping-policy{font-size:11px;line-height:1.6;color:#52675f}
 
 .site-frame .summary>[data-order-pricing]{display:block}.order-pricing>div{display:flex;justify-content:space-between;gap:10px;margin:12px 0;font-size:12px}.summary .quote-message{font-size:12px;line-height:1.5}.is-disabled{opacity:.5;cursor:not-allowed}.checkout-summary .coupon{padding:5px 0 12px}.checkout-summary .coupon input{width:100%;min-width:0}.checkout-summary .coupon .btn{margin:0}

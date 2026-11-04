@@ -126,4 +126,3 @@ document.addEventListener('click',e=>{if(e.target.closest('[data-menu-toggle]'))
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawers()});window.addEventListener('popstate',closeDrawers);
 const renderPresentation=render;
 render=async function(){closeDrawers();await renderPresentation();document.body.dataset.page=location.pathname;if(document.querySelector('#catalog-filters'))applyCatalogFilters();};
-init();

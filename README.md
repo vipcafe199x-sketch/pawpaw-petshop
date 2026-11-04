@@ -60,3 +60,7 @@ python -m backend.repair_reported_data
 ## v1.1.4 follow-up
 
 Xem [hướng dẫn kiểm tra, bảo vệ database và sửa dữ liệu cũ](docs/followup-v1.1.4.md). Báo giá coupon trước đặt hàng dùng `/api/orders/quote` và cùng phép tính với tạo đơn. Deploy hiện yêu cầu database đang tồn tại trong volume, sao lưu rồi kiểm tra khởi tạo không đổi catalog.
+
+## v1.2.0 quản trị
+
+Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an toàn](docs/admin-v1.2.0.md). Có form sản phẩm đầy đủ và upload ảnh persistent, điều chỉnh kho có lý do, quản lý mã giảm giá, chi tiết khách hàng, báo cáo theo ngày và tìm kiếm chung. Các tab chưa triển khai đã được ẩn.

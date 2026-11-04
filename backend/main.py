@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.database import connect, init_db
+from backend.database import connect, init_db, db_path
+from backend.admin_domain import write_product, promotion_values, catalog_admin, low_threshold, report_data, tier, integer, text, APPOINTMENT_TRANSITIONS
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
 from backend.services.orders import place_order, quote_order, restore_cancelled_stock
 
@@ -22,6 +23,8 @@ STATIC_DIR = ROOT / "frontend" / "static"
 APP_ENV = os.getenv("APP_ENV", "development")
 COOKIE_SECURE = APP_ENV == "production"
 app = FastAPI(title="PawPaw Pet Shop API", version="1.0.0", docs_url="/api/docs" if APP_ENV != "production" else None, redoc_url=None)
+UPLOAD_DIR = db_path().parent / "uploads"
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR, check_dir=False), name="uploads")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
@@ -52,6 +55,7 @@ def startup() -> None:
         if os.getenv("ADMIN_PASSWORD", "").lower().startswith("changeme") or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", os.getenv("ADMIN_EMAIL", "")) or os.getenv("ADMIN_EMAIL", "").lower().endswith(".local"):
             raise RuntimeError("Replace the local demo admin account before starting in production")
     init_db()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def rowdict(row: Any) -> dict[str, Any] | None:
@@ -80,11 +84,11 @@ def current_user(request: Request) -> dict[str, Any] | None:
         return None
     with connect() as conn:
         row = conn.execute(
-            """SELECT u.id,u.email,u.full_name,u.phone,u.role FROM sessions s
+            """SELECT u.id,u.email,u.full_name,u.phone,u.role,u.archived FROM sessions s
                JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?""",
             (session_digest(raw), datetime.now(timezone.utc).isoformat()),
         ).fetchone()
-    return rowdict(row)
+    return rowdict(row) if row and not row["archived"] else None
 
 
 def signed_in(request: Request) -> dict[str, Any]:
@@ -126,9 +130,9 @@ def products(q: str = "", category: str = "", species: str = "", sort: str = "po
     sql = "SELECT * FROM products WHERE active=1"
     params: list[Any] = []
     if q.strip():
-        sql += " AND (name LIKE ? OR description LIKE ? OR sku LIKE ?)"
+        sql += " AND (name LIKE ? OR description LIKE ? OR sku LIKE ? OR brand LIKE ?)"
         term = f"%{q.strip()}%"
-        params.extend([term, term, term])
+        params.extend([term, term, term, term])
     if category:
         sql += " AND category=?"
         params.append(category)
@@ -153,7 +157,7 @@ def product_detail(slug: str) -> dict[str, Any]:
 
 @app.get("/api/storefront/settings")
 def storefront_settings() -> dict[str, str]:
-    public_keys = {"store_name", "free_shipping_from_vnd", "support_phone", "support_email", "store_address"}
+    public_keys = {"store_name", "free_shipping_from_vnd", "support_phone", "support_email", "store_address", "low_stock_threshold"}
     with connect() as conn:
         return {r["key"]: r["value"] for r in conn.execute("SELECT key,value FROM settings").fetchall() if r["key"] in public_keys}
 
@@ -195,7 +199,7 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
         raise HTTPException(429, "Thử đăng nhập quá nhiều lần. Vui lòng đợi 15 phút.")
     with connect() as conn:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    if not row or not verify_password(password, row["password_hash"]):
+    if not row or row["archived"] or not verify_password(password, row["password_hash"]):
         attempts.append(now)
         raise HTTPException(401, "Email hoặc mật khẩu chưa chính xác")
     attempts.clear()
@@ -319,15 +323,15 @@ def faqs() -> list[dict[str, str]]:
 
 
 @app.get("/api/admin/dashboard")
-def admin_dashboard(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+def admin_dashboard(start: str = '', end: str = '', granularity: str = 'day', admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    result = report_data(start, end, granularity)
     with connect() as conn:
-        totals = conn.execute("""SELECT COUNT(*) order_count, COALESCE(SUM(CASE WHEN status!='cancelled' THEN total_vnd ELSE 0 END),0) revenue,
-                                 COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) pending_count FROM orders""").fetchone()
-        customers = conn.execute("SELECT COUNT(*) c FROM users WHERE role='customer'").fetchone()["c"]
-        low = conn.execute("SELECT id,name,stock,emoji FROM products WHERE active=1 AND stock<=12 ORDER BY stock ASC LIMIT 5").fetchall()
-        latest = conn.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 5").fetchall()
-        categories = conn.execute("SELECT category,COUNT(*) count FROM products WHERE active=1 GROUP BY category ORDER BY count DESC").fetchall()
-    return {"revenue_vnd": totals["revenue"], "order_count": totals["order_count"], "pending_count": totals["pending_count"], "customer_count": customers, "low_stock": [dict(x) for x in low], "latest_orders": [dict(x) for x in latest], "categories": [dict(x) for x in categories]}
+        threshold = low_threshold(conn)
+        low = conn.execute('SELECT * FROM products WHERE active=1 AND price_vnd>0 AND stock<=? ORDER BY stock LIMIT 20',(threshold,)).fetchall()
+        latest = conn.execute('SELECT * FROM orders ORDER BY created_at DESC LIMIT 5').fetchall()
+        result.update(low_stock=[dict(p) for p in low],latest_orders=[dict(o) for o in latest],low_stock_threshold=threshold,
+            categories=[dict(r) for r in conn.execute('SELECT category,COUNT(*) count FROM products WHERE active=1 GROUP BY category')])
+    return result
 
 
 @app.get("/api/admin/orders")
@@ -385,7 +389,7 @@ async def update_order(order_id: int, request: Request, admin: dict[str, Any] = 
 @app.get("/api/admin/products")
 def admin_products(admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
     with connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()]
+        return catalog_admin(conn)
 
 
 def product_integer(value: Any, minimum: int = 0) -> int:
@@ -401,47 +405,24 @@ def product_integer(value: Any, minimum: int = 0) -> int:
 async def create_product(request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     require_csrf(request)
     body = await request.json()
-    name = str(body.get("name", "")).strip()
-    slug = re.sub(r"[^a-z0-9]+", "-", str(body.get("slug", name)).lower()).strip("-")
-    price = product_integer(body.get("price_vnd"), minimum=1)
-    stock = product_integer(body.get("stock", 0))
-    compare = product_integer(body.get("compare_price_vnd", 0))
-    if len(name) < 3 or not slug:
-        raise HTTPException(422, "Thông tin sản phẩm chưa hợp lệ")
-    sku = str(body.get("sku", "")).strip() or "PP-" + secrets.token_hex(3).upper()
-    with connect() as conn:
-        try:
-            cur = conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,compare_price_vnd,stock,sku,emoji,description,featured) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (slug,name,str(body.get("category","Phụ kiện")),str(body.get("species","Chó")),price,compare,stock,sku,str(body.get("emoji","🐾")),str(body.get("description","")),int(bool(body.get("featured")))))
-        except Exception as exc:
-            if "UNIQUE constraint failed" in str(exc): raise HTTPException(409, "Slug hoặc SKU đã tồn tại")
-            raise
-        return dict(conn.execute("SELECT * FROM products WHERE id=?", (cur.lastrowid,)).fetchone())
+    body.setdefault('sku','PP-'+secrets.token_hex(3).upper())
+    return write_product(body, admin['id'])
 
 
 @app.patch("/api/admin/products/{product_id}")
 async def update_product(product_id: int, request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     require_csrf(request)
-    body = await request.json()
-    fields = {"name": "name", "category": "category", "species": "species", "price_vnd": "price_vnd", "compare_price_vnd": "compare_price_vnd", "stock": "stock", "description": "description", "active": "active", "featured": "featured", "emoji": "emoji"}
-    for key in ("price_vnd", "compare_price_vnd", "stock"):
-        if key in body:
-            body[key] = product_integer(body[key], minimum=1 if key == "price_vnd" else 0)
-    updates = [(db, body[key]) for key, db in fields.items() if key in body]
-    if not updates:
-        raise HTTPException(422, "Không có nội dung cần cập nhật")
-    with connect() as conn:
-        if not conn.execute("SELECT id FROM products WHERE id=?", (product_id,)).fetchone(): raise HTTPException(404, "Không tìm thấy sản phẩm")
-        conn.execute("UPDATE products SET " + ",".join(f"{name}=?" for name,_ in updates) + " WHERE id=?", [v for _,v in updates] + [product_id])
-        return dict(conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone())
+    return write_product(await request.json(), admin['id'], product_id)
 
 
 @app.post("/api/admin/inventory")
 async def inventory_adjust(request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     require_csrf(request)
     body = await request.json()
-    try: product_id, delta = int(body.get("productId")), int(body.get("delta"))
-    except (TypeError, ValueError): raise HTTPException(422, "Sản phẩm và số lượng không hợp lệ")
-    if delta == 0 or abs(delta) > 10000: raise HTTPException(422, "Điều chỉnh phải khác 0 và không quá 10.000")
+    product_id = integer(body.get('productId'),1)
+    delta = integer(body.get('delta'),-10000,10000)
+    reason = text(body.get('reason',''),160)
+    if delta == 0 or len(reason)<2: raise HTTPException(422,'Nhập lượng điều chỉnh khác 0 và lý do')
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -449,7 +430,7 @@ async def inventory_adjust(request: Request, admin: dict[str, Any] = Depends(adm
             if not row: raise HTTPException(404, "Không tìm thấy sản phẩm")
             if row["stock"] + delta < 0: raise HTTPException(409, "Tồn kho không thể âm")
             conn.execute("UPDATE products SET stock=stock+? WHERE id=?", (delta, product_id))
-            cur = conn.execute("INSERT INTO inventory_events(product_id,delta,reason,actor_id) VALUES(?,?,?,?)", (product_id,delta,str(body.get("reason","Điều chỉnh thủ công"))[:160],admin["id"]))
+            cur = conn.execute("INSERT INTO inventory_events(product_id,delta,reason,actor_id) VALUES(?,?,?,?)", (product_id,delta,reason,admin["id"]))
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK"); raise
@@ -457,14 +438,14 @@ async def inventory_adjust(request: Request, admin: dict[str, Any] = Depends(adm
 
 
 @app.get("/api/admin/customers")
-def admin_customers(q: str = "", admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
+def admin_customers(q: str = "", include_archived: bool = False, admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
     with connect() as conn:
-        sql = """SELECT u.id,u.full_name,u.email,u.phone,u.created_at,COUNT(o.id) order_count,COALESCE(SUM(o.total_vnd),0) spent_vnd
-                 FROM users u LEFT JOIN orders o ON o.user_id=u.id WHERE u.role='customer'"""
-        params: list[Any] = []
+        sql = """SELECT u.id,u.full_name,u.email,u.phone,u.created_at,u.archived,COUNT(CASE WHEN o.status!='cancelled' THEN 1 END) order_count,COALESCE(SUM(CASE WHEN o.status!='cancelled' THEN o.total_vnd ELSE 0 END),0) spent_vnd
+                 FROM users u LEFT JOIN orders o ON o.user_id=u.id WHERE u.role='customer' AND (u.archived=0 OR ?)"""
+        params: list[Any] = [include_archived]
         if q:
-            sql += " AND (u.full_name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)"; params = [f"%{q}%"]*3
-        return [dict(r) for r in conn.execute(sql + " GROUP BY u.id ORDER BY spent_vnd DESC LIMIT 200", params).fetchall()]
+            sql += " AND (u.full_name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)"; params += [f"%{q}%"]*3
+        return [{**dict(r),"tier":tier(r["spent_vnd"])} for r in conn.execute(sql + " GROUP BY u.id ORDER BY spent_vnd DESC LIMIT 200", params).fetchall()]
 
 
 @app.get("/api/admin/promotions")
@@ -474,21 +455,35 @@ def admin_promotions(admin: dict[str, Any] = Depends(admin_user)) -> list[dict[s
 
 @app.post("/api/admin/promotions")
 async def create_promotion(request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
-    require_csrf(request); body = await request.json()
-    code = re.sub(r"[^A-Z0-9]", "", str(body.get("code", "")).upper())
-    typ = str(body.get("discount_type", "percent")); value = int(body.get("discount_value", 0))
-    if len(code) < 4 or typ not in {"percent","fixed"} or value <= 0 or (typ == "percent" and value > 80): raise HTTPException(422, "Mã ưu đãi chưa hợp lệ")
+    require_csrf(request)
+    values = promotion_values(await request.json())
     with connect() as conn:
-        try: conn.execute("INSERT INTO coupons(code,discount_type,discount_value,minimum_vnd,usage_limit) VALUES(?,?,?,?,?)", (code,typ,value,int(body.get("minimum_vnd",0)),int(body.get("usage_limit",0))))
-        except Exception as exc:
-            if "UNIQUE constraint failed" in str(exc): raise HTTPException(409, "Mã ưu đãi đã tồn tại")
+        try:
+            conn.execute('INSERT INTO coupons('+','.join(values)+') VALUES('+','.join('?' for _ in values)+')',list(values.values()))
+        except Exception as error:
+            if 'UNIQUE constraint failed' in str(error): raise HTTPException(409,'Mã ưu đãi đã tồn tại')
             raise
-        return dict(conn.execute("SELECT * FROM coupons WHERE code=?", (code,)).fetchone())
+        return dict(conn.execute('SELECT * FROM coupons WHERE code=?',(values['code'],)).fetchone())
+
+
+@app.patch('/api/admin/promotions/{code}')
+async def update_promotion(code: str, request: Request, admin: dict[str, Any] = Depends(admin_user)):
+    require_csrf(request)
+    with connect() as conn:
+        current = conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE',(code,)).fetchone()
+        if not current: raise HTTPException(404,'Không tìm thấy mã ưu đãi')
+        values = promotion_values(await request.json(),current)
+        conn.execute('UPDATE coupons SET '+','.join(k+'=?' for k in values)+' WHERE code=?',list(values.values())+[code])
+        return dict(conn.execute('SELECT * FROM coupons WHERE code=?',(code,)).fetchone())
 
 
 @app.get("/api/admin/appointments")
-def admin_appointments(admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
-    with connect() as conn: return [dict(r) for r in conn.execute("SELECT * FROM appointments ORDER BY service_date DESC,time_slot LIMIT 200").fetchall()]
+def admin_appointments(month: str = '', admin: dict[str, Any] = Depends(admin_user)) -> list[dict[str, Any]]:
+    if month:
+        try: date.fromisoformat(month+'-01')
+        except ValueError: raise HTTPException(422,'Tháng không hợp lệ')
+    with connect() as conn:
+        return [dict(r) for r in conn.execute('SELECT * FROM appointments'+(' WHERE substr(service_date,1,7)=?' if month else '')+' ORDER BY service_date,time_slot', [month] if month else []).fetchall()]
 
 
 @app.patch("/api/admin/appointments/{appointment_id}")
@@ -496,18 +491,17 @@ async def update_appointment(appointment_id: int, request: Request, admin: dict[
     require_csrf(request); body = await request.json(); status = str(body.get("status",""))
     if status not in {"requested","confirmed","completed","cancelled"}: raise HTTPException(422, "Trạng thái lịch hẹn không hợp lệ")
     with connect() as conn:
-        cur = conn.execute("UPDATE appointments SET status=? WHERE id=?", (status,appointment_id))
-        if not cur.rowcount: raise HTTPException(404,"Không tìm thấy lịch hẹn")
-        return dict(conn.execute("SELECT * FROM appointments WHERE id=?", (appointment_id,)).fetchone())
+        conn.execute('BEGIN IMMEDIATE')
+        row=conn.execute('SELECT * FROM appointments WHERE id=?',(appointment_id,)).fetchone()
+        if not row: raise HTTPException(404,'Không tìm thấy lịch hẹn')
+        if status!=row['status'] and status not in APPOINTMENT_TRANSITIONS[row['status']]: raise HTTPException(409,'Lịch hẹn chỉ được chuyển tiếp')
+        conn.execute('UPDATE appointments SET status=? WHERE id=?',(status,appointment_id))
+        return dict(conn.execute('SELECT * FROM appointments WHERE id=?',(appointment_id,)).fetchone())
 
 
 @app.get("/api/admin/reports")
-def admin_reports(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
-    with connect() as conn:
-        month = conn.execute("SELECT substr(created_at,1,7) month,COUNT(*) orders,COALESCE(SUM(total_vnd),0) revenue FROM orders WHERE status!='cancelled' GROUP BY month ORDER BY month DESC LIMIT 12").fetchall()
-        best = conn.execute("SELECT i.product_name,SUM(i.quantity) units,SUM(i.unit_price_vnd*i.quantity) revenue FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.status!='cancelled' GROUP BY i.product_name ORDER BY units DESC LIMIT 8").fetchall()
-        returns_count = conn.execute("SELECT COUNT(*) c FROM returns").fetchone()["c"]
-    return {"months": [dict(r) for r in reversed(month)], "best_sellers": [dict(r) for r in best], "returns_count": returns_count}
+def admin_reports(start: str = '', end: str = '', granularity: str = 'day', admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    return report_data(start,end,granularity)
 
 
 @app.get("/api/admin/settings")
@@ -518,11 +512,85 @@ def admin_settings(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, str
 @app.patch("/api/admin/settings")
 async def update_settings(request: Request, admin: dict[str, Any] = Depends(admin_user)) -> dict[str, str]:
     require_csrf(request); body = await request.json()
-    allowed = {"store_name","free_shipping_from_vnd","support_phone","support_email","store_address"}
+    allowed = {"store_name","free_shipping_from_vnd","support_phone","support_email","store_address","low_stock_threshold"}
+    for key in ("free_shipping_from_vnd","low_stock_threshold"):
+        if key in body: body[key] = integer(body[key],0,10000 if key=="low_stock_threshold" else 2147483647)
     with connect() as conn:
         for k,v in body.items():
             if k in allowed: conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k,str(v)[:200]))
         return {r["key"]: r["value"] for r in conn.execute("SELECT key,value FROM settings").fetchall()}
+
+
+@app.post('/api/admin/uploads')
+async def upload_product_image(request: Request, admin: dict[str, Any] = Depends(admin_user)):
+    require_csrf(request)
+    from PIL import Image, UnidentifiedImageError
+    import io
+    data=bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data)>5*1024*1024: raise HTTPException(413,'Ảnh tối đa 5 MB')
+    try:
+        image=Image.open(io.BytesIO(data))
+        if image.format not in ('JPEG','PNG','WEBP') or image.width*image.height>20000000:
+            raise ValueError()
+        image.load();image=image.convert('RGBA');image.thumbnail((2000,2000))
+    except (UnidentifiedImageError,ValueError,OSError,Image.DecompressionBombError):
+        raise HTTPException(422,'Chỉ nhận ảnh JPEG/PNG/WebP hợp lệ, tối đa 20 megapixel')
+    UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
+    name=secrets.token_hex(16)+'.webp';image.save(UPLOAD_DIR/name,'WEBP',quality=88)
+    return {'image_url':'/uploads/'+name}
+
+
+@app.get('/api/admin/inventory')
+def inventory_history(admin: dict[str, Any] = Depends(admin_user)):
+    with connect() as conn:
+        return [dict(r) for r in conn.execute('SELECT e.*,p.name,p.sku FROM inventory_events e JOIN products p ON p.id=e.product_id ORDER BY e.id DESC LIMIT 200')]
+
+
+@app.get('/api/admin/customers/{customer_id}')
+def customer_detail(customer_id: int, admin: dict[str, Any] = Depends(admin_user)):
+    with connect() as conn:
+        customer=conn.execute("SELECT id,full_name,email,phone,created_at,archived FROM users WHERE id=? AND role='customer'",(customer_id,)).fetchone()
+        if not customer: raise HTTPException(404,'Không tìm thấy khách hàng')
+        orders=[order_view(conn,o) for o in conn.execute('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC',(customer_id,))]
+        spent=sum(o['total_vnd'] for o in orders if o['status']!='cancelled')
+        return {**dict(customer),'orders':orders,'spent_vnd':spent,'order_count':sum(o['status']!='cancelled' for o in orders),'tier':tier(spent)}
+
+
+@app.patch('/api/admin/customers/{customer_id}')
+async def update_customer(customer_id: int, request: Request, admin: dict[str, Any] = Depends(admin_user)):
+    require_csrf(request);body=await request.json()
+    with connect() as conn:
+        row=conn.execute("SELECT * FROM users WHERE id=? AND role='customer'",(customer_id,)).fetchone()
+        if not row: raise HTTPException(404,'Không tìm thấy khách hàng')
+        name=text(body.get('full_name',row['full_name']),200)
+        email=text(body.get('email',row['email']),200).lower();phone=text(body.get('phone',row['phone']),30)
+        archived=integer(body.get('archived',row['archived']),0,1)
+        if len(name)<2 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) or (phone and not re.fullmatch(r'\+?\d{9,13}',phone)):
+            raise HTTPException(422,'Tên, email hoặc số điện thoại chưa hợp lệ')
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            conn.execute('UPDATE users SET full_name=?,email=?,phone=?,archived=? WHERE id=?',(name,email,phone,archived,customer_id))
+            if archived: conn.execute('DELETE FROM sessions WHERE user_id=?',(customer_id,))
+            conn.execute('COMMIT')
+        except Exception as error:
+            conn.execute('ROLLBACK')
+            if 'UNIQUE constraint failed' in str(error): raise HTTPException(409,'Email đã được sử dụng')
+            raise
+    return customer_detail(customer_id,admin)
+
+
+@app.get('/api/admin/search')
+def admin_search(q: str = '', admin: dict[str, Any] = Depends(admin_user)):
+    q=q.strip()
+    if not 2<=len(q)<=100: raise HTTPException(422,'Tìm kiếm cần 2–100 ký tự')
+    with connect() as conn:
+        term='%'+q+'%'
+        products=[dict(r) for r in conn.execute('SELECT id,name,sku,slug FROM products WHERE name LIKE ? OR sku LIKE ? OR brand LIKE ? LIMIT 20',(term,term,term))]
+        orders=[dict(r) for r in conn.execute('SELECT id,order_code,customer_name,status FROM orders WHERE order_code LIKE ? OR customer_name LIKE ? OR phone LIKE ? LIMIT 20',(term,term,term))]
+        customers=[dict(r) for r in conn.execute("SELECT id,full_name,email FROM users WHERE role='customer' AND archived=0 AND (full_name LIKE ? OR email LIKE ? OR phone LIKE ?) LIMIT 20",(term,term,term))]
+    return {'products':products,'orders':orders,'customers':customers}
 
 
 @app.get("/{path:path}", include_in_schema=False)

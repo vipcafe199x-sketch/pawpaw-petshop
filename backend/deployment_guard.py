@@ -9,9 +9,10 @@ from pathlib import Path
 from backend.database import connect, db_path, init_db
 
 
-def catalog_fingerprint():
+def catalog_fingerprint(columns=None):
     with connect() as conn:
-        rows = [dict(row) for row in conn.execute('SELECT * FROM products ORDER BY id')]
+        columns = columns or [row['name'] for row in conn.execute('PRAGMA table_info(products)')]
+        rows = [dict(row) for row in conn.execute('SELECT '+','.join(columns)+' FROM products ORDER BY id')]
     return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
 
 
@@ -27,9 +28,11 @@ def protect_existing_database(data_root):
         backup = backup_dir / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.sqlite3')
         with sqlite3.connect(backup) as target:
             conn.backup(target)
-    before = catalog_fingerprint()
+    with connect() as conn:
+        columns = [row['name'] for row in conn.execute('PRAGMA table_info(products)')]
+    before = catalog_fingerprint(columns)
     init_db()
-    if catalog_fingerprint() != before:
+    if catalog_fingerprint(columns) != before:
         raise RuntimeError('Catalog changed during startup initialization; deploy stopped. Restore the pre-deploy backup before retrying.')
     return {'existing_database': True, 'backup_created': True, 'catalog_unchanged': True}
 

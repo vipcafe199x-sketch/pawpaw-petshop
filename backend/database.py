@@ -56,6 +56,16 @@ def init_db() -> None:
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        additions = {
+            'products': {'brand': "TEXT NOT NULL DEFAULT ''", 'specifications': "TEXT NOT NULL DEFAULT ''", 'image_url': "TEXT NOT NULL DEFAULT ''"},
+            'coupons': {'starts_at': "TEXT NOT NULL DEFAULT ''"},
+            'users': {'archived': 'INTEGER NOT NULL DEFAULT 0'},
+        }
+        for table, columns in additions.items():
+            existing = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+            for column, definition in columns.items():
+                if column not in existing:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if fresh_database:
             for idx, row in enumerate(DEFAULT_PRODUCTS):
                 slug, name, category, species, price, compare, stock, emoji, desc = row
@@ -68,6 +78,7 @@ def init_db() -> None:
             conn.execute("INSERT OR IGNORE INTO coupons(code,discount_type,discount_value,minimum_vnd,usage_limit) VALUES('PAWPAW10','percent',10,150000,500)")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('store_name','PawPaw Pet Shop')")
         conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('free_shipping_from_vnd','299000')")
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('low_stock_threshold','5')")
         admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
         admin_password = os.getenv("ADMIN_PASSWORD", "")
         if not admin_email or not admin_password:

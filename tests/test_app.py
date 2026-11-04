@@ -282,5 +282,145 @@ class PawPawApiTests(unittest.TestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) n FROM operational_adjustments WHERE subject_id=?',(str(order['id']),)).fetchone()['n'],1)
 
 
+
+    def test_full_product_metadata_and_upload(self):
+        import io
+        from PIL import Image
+        p = self.product()
+        image = io.BytesIO()
+        Image.new('RGB', (32, 24), 'green').save(image, 'PNG')
+        upload = self.client.post('/api/admin/uploads', headers={**self.headers, 'Content-Type': 'image/png'}, content=image.getvalue())
+        self.assertEqual(upload.status_code, 200, upload.text)
+        image_url = upload.json()['image_url']
+        self.assertEqual(self.client.get(image_url).headers['content-type'], 'image/webp')
+        values = {'description': 'QA description', 'specifications': 'QA dimensions', 'brand': 'QA BRAND', 'category': 'QA CATEGORY',
+                  'species': 'Mèo', 'compare_price_vnd': p['price_vnd'] + 10000, 'image_url': image_url, 'featured': 1}
+        response = self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json=values)
+        self.assertEqual(response.status_code, 200, response.text)
+        for key, value in values.items(): self.assertEqual(response.json()[key], value)
+        self.assertEqual(self.client.get('/api/products', params={'q': 'QA BRAND'}).json()[0]['brand'], 'QA BRAND')
+        for body in [{'compare_price_vnd': 1}, {'image_url': 'https://qa.invalid/image.svg'}, {'sku': 'NEW-ID'}]:
+            self.assertEqual(self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json=body).status_code, 422)
+        self.assertEqual(self.client.post('/api/admin/uploads', headers=self.headers, content=b'<svg/>').status_code, 422)
+        self.assertEqual(self.client.post('/api/admin/uploads', headers=self.headers, content=b'x' * (5*1024*1024+1)).status_code, 413)
+        self.assertEqual(self.client.post('/api/admin/uploads', content=image.getvalue()).status_code, 403)
+        draft = self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'active': 0, 'price_vnd': 0})
+        self.assertEqual(draft.status_code, 200)
+        admin_product = next(r for r in self.client.get('/api/admin/products').json() if r['id'] == p['id'])
+        self.assertEqual(admin_product['stock_status'], 'draft')
+
+    def test_inventory_dialog_api_ledger_and_threshold(self):
+        p = self.product()
+        url = '/api/admin/inventory'
+        for delta in [None, '', 0, True, 1.5, 10001, -10001]:
+            r = self.client.post(url, headers=self.headers, json={'productId': p['id'], 'delta': delta, 'reason': 'QA adjustment'})
+            self.assertEqual(r.status_code, 422, r.text)
+        self.assertEqual(self.stock(p), p['stock'])
+        r = self.client.post(url, headers=self.headers, json={'productId': p['id'], 'delta': -p['stock']-1, 'reason': 'QA adjustment'})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.stock(p), p['stock'])
+        r = self.client.post(url, headers=self.headers, json={'productId': p['id'], 'delta': 3, 'reason': 'QA adjustment'})
+        self.assertEqual(r.json()['stock'], p['stock']+3)
+        self.assertTrue(any(e['id']==r.json()['event_id'] and e['delta']==3 for e in self.client.get(url).json()))
+        self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'stock': 8})
+        self.client.patch('/api/admin/settings', headers=self.headers, json={'low_stock_threshold': 5})
+        def status(): return next(r for r in self.client.get('/api/admin/products').json() if r['id']==p['id'])['stock_status']
+        self.assertEqual(status(), 'available')
+        self.client.patch('/api/admin/settings', headers=self.headers, json={'low_stock_threshold': 8})
+        self.assertEqual(status(), 'low')
+        self.assertEqual(self.client.patch('/api/admin/settings', headers=self.headers, json={'low_stock_threshold': -1}).status_code, 422)
+        self.client.patch('/api/admin/settings', headers=self.headers, json={'low_stock_threshold': 5})
+
+    def test_promotion_create_edit_dates_usage_disable(self):
+        p = self.product()
+        code = 'QA-' + secrets.token_hex(6).upper()
+        body = {'code': code, 'discount_type': 'percent', 'discount_value': 10, 'minimum_vnd': 0, 'usage_limit': 2, 'starts_at': '2000-01-01', 'expires_at': '2099-01-01', 'active': 1}
+        response = self.client.post('/api/admin/promotions', headers=self.headers, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.post('/api/admin/promotions', headers=self.headers, json=body).status_code, 409)
+        url = '/api/admin/promotions/' + code
+        for body in [{'discount_value': 101}, {'discount_value': ''}, {'starts_at': '2100-01-01'}, {'code': 'DIFFERENT'}, {'expires_at': 'bad-date'}]:
+            self.assertEqual(self.client.patch(url, headers=self.headers, json=body).status_code, 422)
+        self.assertEqual(self.order(p, coupon=code).status_code, 200)
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'discount_type': 'fixed', 'discount_value': 1000}).status_code, 200)
+        self.client.patch(url, headers=self.headers, json={'starts_at': '2090-01-01'})
+        self.assertEqual(self.order(p, coupon=code).status_code, 422)
+        self.client.patch(url, headers=self.headers, json={'starts_at': '', 'active': 0})
+        self.assertEqual(self.order(p, coupon=code).status_code, 422)
+
+    def test_appointment_forward_only_and_month(self):
+        body = {'serviceType': 'vet', 'petName': 'QA', 'petSpecies': 'Chó', 'ownerName': 'QA', 'phone': '0000000000', 'serviceDate': '2051-02-03', 'timeSlot': '10:00'}
+        created = self.client.post('/api/bookings', headers=self.headers, json=body)
+        self.assertEqual(created.status_code, 200, created.text)
+        aid = created.json()['id']; url = f'/api/admin/appointments/{aid}'
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'status': 'confirmed'}).status_code, 200)
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'status': 'requested'}).status_code, 409)
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'status': 'completed'}).status_code, 200)
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'status': 'cancelled'}).status_code, 409)
+        self.assertTrue(any(r['id']==aid for r in self.client.get('/api/admin/appointments?month=2051-02').json()))
+        self.assertFalse(any(r['id']==aid for r in self.client.get('/api/admin/appointments?month=2051-03').json()))
+        self.assertEqual(self.client.get('/api/admin/appointments?month=invalid').status_code, 422)
+
+    def test_customer_detail_archive_and_search(self):
+        token = secrets.token_hex(6); email = 'qa-'+token+'@example.invalid'; password = secrets.token_urlsafe(24)
+        r = self.client.post('/api/auth/register', headers=self.headers, json={'email': email, 'password': password, 'fullName': 'QA '+token, 'phone': '0000000000'})
+        cid = r.json()['id']; self.login(self.client, self.headers)
+        url = f'/api/admin/customers/{cid}'
+        detail = self.client.get(url).json()
+        self.assertEqual(detail['tier'], 'Thành viên mới'); self.assertEqual(detail['orders'], [])
+        self.assertNotIn('password_hash', detail)
+        self.assertTrue(any(c['id']==cid for c in self.client.get('/api/admin/search', params={'q': token}).json()['customers']))
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'full_name': 'QA UPDATED', 'archived': 1}).status_code, 200)
+        self.assertFalse(any(c['id']==cid for c in self.client.get('/api/admin/customers').json()))
+        self.assertEqual(self.client.post('/api/auth/login', headers=self.headers, json={'email':email,'password':password}).status_code, 401)
+        self.login(self.client, self.headers)
+        self.assertEqual(self.client.patch(url, headers=self.headers, json={'archived': 0}).status_code, 200)
+        self.assertEqual(self.client.get('/api/admin/search?q=x').status_code, 422)
+
+    def test_date_scoped_reports_and_consistent_definitions(self):
+        p = self.product(); first = self.order(p).json(); second = self.order(p).json()
+        self.client.patch(f"/api/admin/orders/{second['id']}", headers=self.headers, json={'status':'cancelled'})
+        with connect() as conn:
+            conn.execute('UPDATE orders SET created_at=? WHERE id IN (?,?)', ('2049-06-10T18:00:00Z', first['id'], second['id']))
+        query = '?start=2049-06-11&end=2049-06-11&granularity=day'
+        reports = self.client.get('/api/admin/reports'+query).json(); dashboard = self.client.get('/api/admin/dashboard'+query).json()
+        for data in [reports, dashboard]:
+            self.assertEqual(data['order_count'], 1); self.assertEqual(data['total_order_count'], 2); self.assertEqual(data['cancelled_count'], 1)
+            self.assertEqual(data['revenue_vnd'], first['total_vnd']); self.assertEqual(data['series'][0]['month'], '2049-06-11')
+        self.assertEqual(self.client.get('/api/admin/reports?start=2049-06-10&end=2049-06-10').json()['order_count'], 0)
+        for query in ['start=bad', 'start=2050-01-01&end=2000-01-01', 'granularity=invalid']:
+            self.assertEqual(self.client.get('/api/admin/reports?'+query).status_code, 422)
+        for status in ['confirmed', 'preparing', 'shipping', 'delivered']:
+            self.assertEqual(self.client.patch(f"/api/admin/orders/{first['id']}", headers=self.headers, json={'status':status}).status_code, 200)
+        for oid in [first['id'], second['id']]:
+            self.assertEqual(self.client.patch(f'/api/admin/orders/{oid}', headers=self.headers, json={'status':'confirmed'}).status_code, 409)
+
+
+    def test_legacy_schema_migration_preserves_existing_catalog(self):
+        import sqlite3
+        from unittest.mock import patch
+        from backend.database import SCHEMA_PATH
+        from backend.deployment_guard import protect_existing_database
+        with tempfile.TemporaryDirectory(prefix='pawpaw-legacy-qa-') as folder:
+            path = Path(folder) / 'legacy.sqlite3'
+            with sqlite3.connect(path) as conn:
+                conn.executescript(SCHEMA_PATH.read_text())
+                conn.execute("INSERT INTO products(slug,name,category,species,price_vnd,stock,sku) VALUES('qa-legacy','QA LEGACY','QA','QA',12345,3,'QA-LEGACY')")
+            with patch.dict(os.environ, {'DATABASE_PATH': str(path)}):
+                result = protect_existing_database(folder)
+                self.assertTrue(result['catalog_unchanged'])
+                with connect() as conn:
+                    row = conn.execute('SELECT * FROM products').fetchone()
+                    self.assertEqual((row['price_vnd'],row['stock'],row['brand']), (12345,3,''))
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM products').fetchone()[0], 1)
+                self.assertTrue(protect_existing_database(folder)['catalog_unchanged'])
+
+    def test_stale_product_editor_cannot_overwrite_new_stock(self):
+        p = self.product()
+        self.client.post('/api/admin/inventory', headers=self.headers, json={'productId':p['id'],'delta':2,'reason':'QA stock change'})
+        response = self.client.patch(f"/api/admin/products/{p['id']}", headers=self.headers, json={'expected_stock':p['stock'],'stock':p['stock'],'name':'QA STALE'})
+        self.assertEqual(response.status_code,409)
+        self.assertEqual(self.stock(p),p['stock']+2)
+
 if __name__ == '__main__':
     unittest.main()

@@ -61,7 +61,9 @@ try{
 return adminShell(`<section class="card"><h1>${esc(title)}</h1></section>`,path);
 }
 function statusLabel(s){return ({pending:"Chờ xác nhận",confirmed:"Đã xác nhận",preparing:"Đang chuẩn bị",shipping:"Đang giao",delivered:"Đã giao",cancelled:"Đã hủy",requested:"Chờ xác nhận",completed:"Hoàn thành",approved:"Đã duyệt",rejected:"Từ chối",refunded:"Đã hoàn tiền"})[s]||s}
-function orderTable(rows,admin=false){return `<div class="table-scroll"><table><thead><tr><th>Mã đơn</th><th>Ngày đặt</th><th>Khách hàng</th><th>Tổng tiền</th><th>Trạng thái</th>${admin?"<th>Cập nhật</th>":""}</tr></thead><tbody>${rows.map(o=>`<tr><td><b>${esc(o.order_code)}</b></td><td>${esc(localDateTime(o.created_at))}</td><td>${esc(o.customer_name)}<small>${esc(o.phone)}</small></td><td><b>${money(o.total_vnd)}</b></td><td><span class="status ${esc(o.status)}" data-order-status-label="${o.id}">${statusLabel(o.status)}</span></td>${admin?`<td><select data-order-status="${o.id}" data-current="${esc(o.status)}"><option value="${esc(o.status)}">${statusLabel(o.status)}</option>${["confirmed","preparing","shipping","delivered","cancelled"].filter(s=>s!==o.status).map(s=>`<option value="${s}">${statusLabel(s)}</option>`).join("")}</select></td>`:""}</tr>`).join("")||`<tr><td colspan="6" class="empty-cell">Chưa có đơn hàng.</td></tr>`}</tbody></table></div>`}
+const ORDER_NEXT={pending:['confirmed','cancelled'],confirmed:['preparing','cancelled'],preparing:['shipping','cancelled'],shipping:['delivered'],delivered:[],cancelled:[]};
+function orderOptions(status){return [status,...(ORDER_NEXT[status]||[])].map(value=>`<option value="${esc(value)}" ${value===status?'selected':''}>${statusLabel(value)}</option>`).join('')}
+function orderTable(rows,admin=false){return `<div class="table-scroll"><table><thead><tr><th>Mã đơn</th><th>Ngày đặt</th><th>Khách hàng</th><th>Tổng tiền</th><th>Trạng thái</th>${admin?"<th>Cập nhật</th>":""}</tr></thead><tbody>${rows.map(o=>`<tr><td><b>${esc(o.order_code)}</b></td><td>${esc(localDateTime(o.created_at))}</td><td>${esc(o.customer_name)}<small>${esc(o.phone)}</small></td><td><b>${money(o.total_vnd)}</b></td><td><span class="status ${esc(o.status)}" data-order-status-label="${o.id}">${statusLabel(o.status)}</span></td>${admin?`<td><select data-order-status="${o.id}" data-current="${esc(o.status)}" ${!(ORDER_NEXT[o.status]||[]).length?'disabled':''}>${orderOptions(o.status)}</select></td>`:""}</tr>`).join("")||`<tr><td colspan="6" class="empty-cell">Chưa có đơn hàng.</td></tr>`}</tbody></table></div>`}
 function productTable(rows,inventory){return `<div class="table-scroll"><table><thead><tr><th>Sản phẩm</th><th>SKU</th><th>Danh mục</th><th>Giá bán</th><th>Tồn kho</th><th>Trạng thái</th><th>Thao tác</th></tr></thead><tbody>${rows.map(p=>`<tr data-category="${esc(p.category)}"><td><span class="table-product">${esc(p.emoji)} <b>${esc(p.name)}</b></span></td><td>${esc(p.sku)}</td><td>${esc(p.category)}</td><td>${money(p.price_vnd)}</td><td><b class="${p.stock<=12?"warning":""}">${p.stock}</b></td><td><span class="status ${p.active?"delivered":"cancelled"}">${p.active?"Đang bán":"Đã ẩn"}</span></td><td><button class="icon-button" data-edit-product="${p.id}">✎</button> ${inventory?`<button class="icon-button" data-restock="${p.id}">＋</button>`:""}</td></tr>`).join("")}</tbody></table></div>`}
 function customerTable(rows){return `<div class="table-scroll"><table><thead><tr><th>Khách hàng</th><th>Liên hệ</th><th>Ngày tham gia</th><th>Đơn hàng</th><th>Tổng chi tiêu</th><th>Hạng</th></tr></thead><tbody>${rows.map(c=>`<tr><td><b>${esc(c.full_name)}</b></td><td>${esc(c.phone)}<small>${esc(c.email)}</small></td><td>${esc((c.created_at||"").slice(0,10))}</td><td>${c.order_count}</td><td><b>${money(c.spent_vnd)}</b></td><td><span class="pill ${c.spent_vnd>3000000?"green":""}">${c.spent_vnd>3000000?"Vàng":"Bạc"}</span></td></tr>`).join("")||`<tr><td colspan="6">Chưa có khách hàng.</td></tr>`}</tbody></table></div>`}
 function promoTable(rows){return `<div class="table-scroll"><table><thead><tr><th>Mã ưu đãi</th><th>Giá trị</th><th>Điều kiện</th><th>Lượt dùng</th><th>Trạng thái</th></tr></thead><tbody>${rows.map(c=>`<tr><td><b>${esc(c.code)}</b></td><td>${c.discount_type==="percent"?`${c.discount_value}%`:money(c.discount_value)}</td><td>Đơn từ ${money(c.minimum_vnd)}</td><td>${c.used_count}${c.usage_limit?` / ${c.usage_limit}`:""}</td><td><span class="status ${c.active?"delivered":"cancelled"}">${c.active?"Đang dùng":"Tạm dừng"}</span></td></tr>`).join("")||`<tr><td colspan="5">Chưa có mã ưu đãi.</td></tr>`}</tbody></table></div>`}
@@ -92,9 +94,6 @@ document.addEventListener("click",async e=>{
  if(action==="logout"){try{await api("/api/auth/logout",{method:"POST",body:"{}"})}catch{}STATE.user=null;toast("Đã đăng xuất");navigate("/");return}
  if(action==="reload"){render();return}
  if(action==="share-favorites"){await navigator.clipboard?.writeText(location.origin+"/favorites");toast("Đã sao chép đường dẫn danh sách");return}
- if(action==="new-product"){const name=prompt("Tên sản phẩm mới:");if(!name)return;const input=prompt("Giá (VND):","99000");if(input===null||!input.trim())return;const price=Number(input);if(!Number.isInteger(price)||price<=0){toast("Giá bán phải là số nguyên lớn hơn 0","error");return}try{await api("/api/admin/products",{method:"POST",body:JSON.stringify({name,price_vnd:price,category:"Phụ kiện",species:"Chó",stock:10})});toast("Đã tạo sản phẩm");render()}catch(e){toast(e.message,"error")}return}
- if(action==="inventory-adjust"||e.target.closest("[data-restock]")){const id=e.target.closest("[data-restock]")?.dataset.restock||prompt("ID sản phẩm cần nhập kho:");if(!id)return;const delta=Number(prompt("Số lượng nhập:","10")||0);try{await api("/api/admin/inventory",{method:"POST",body:JSON.stringify({productId:Number(id),delta,reason:"Nhập thêm hàng"})});toast("Đã cập nhật tồn kho");render()}catch(e){toast(e.message,"error")}return}
- if(action==="new-promo"){const code=prompt("Mã ưu đãi:");if(!code)return;try{await api("/api/admin/promotions",{method:"POST",body:JSON.stringify({code,discount_type:"percent",discount_value:Number(prompt("Phần trăm giảm:","10")||10),minimum_vnd:150000,usage_limit:100})});toast("Đã tạo mã ưu đãi");render()}catch(e){toast(e.message,"error")}return}
  if(action==="export-orders"){try{const rows=await api("/api/admin/orders");downloadCSV(rows,"pawpaw-orders.csv")}catch(e){toast(e.message,"error")}return}
  if(action==="export-customers"){try{const rows=await api("/api/admin/customers");downloadCSV(rows,"pawpaw-customers.csv")}catch(e){toast(e.message,"error")}return}
 });
@@ -102,7 +101,7 @@ function syncServerOrder(order){
  document.querySelectorAll('[data-order-status]').forEach(control=>{
   if(Number(control.dataset.orderStatus)!==Number(order.id))return;
   if(![...control.options].some(option=>option.value===order.status)){const option=document.createElement('option');option.value=order.status;option.textContent=statusLabel(order.status);control.appendChild(option)}
-  control.value=order.status;[...control.options].forEach(option=>option.toggleAttribute('selected',option.value===order.status));control.dataset.current=order.status;
+  control.innerHTML=orderOptions(order.status);control.disabled=!(ORDER_NEXT[order.status]||[]).length;control.value=order.status;[...control.options].forEach(option=>option.toggleAttribute('selected',option.value===order.status));control.dataset.current=order.status;
   const badge=control.closest('tr')?.querySelector('[data-order-status-label],.status');
   if(badge){badge.className='status '+order.status;badge.textContent=statusLabel(order.status)}
  });
@@ -115,7 +114,7 @@ function applyAdminTableFilters(){
  const query=(document.querySelector('#order-search,#product-search,#customer-search')?.value||'').trim().toLocaleLowerCase('vi');
  const status=document.querySelector('#order-status')?.value||'';
  const category=document.querySelector('#product-category')?.value||'';
- document.querySelectorAll('.table-scroll tbody tr').forEach(row=>{
+ document.querySelector('#admin-orders-table,[data-admin-table]')?.querySelectorAll('tbody tr').forEach(row=>{
   const text=row.textContent.toLocaleLowerCase('vi');
   const rowStatus=row.querySelector('[data-order-status]')?.value||row.querySelector('.status')?.classList.contains(status);
   row.hidden=(!!query&&!text.includes(query))||(!!status&&rowStatus!==status&&rowStatus!==true)||(!!category&&row.dataset.category!==category);
@@ -131,9 +130,9 @@ document.addEventListener("change",async e=>{
    try{syncServerOrder(await api(`/api/admin/orders/${id}`))}
    catch{control.value=previous;toast('Không thể xác minh trạng thái máy chủ. Vui lòng thử tải lại.','error')}
    toast(err.message,'error');
-  }finally{control.disabled=false}return;
+  }finally{control.disabled=!(ORDER_NEXT[control.dataset.current]||[]).length}return;
  }
- if(e.target.matches("[data-appointment-status]")){try{await api(`/api/admin/appointments/${e.target.dataset.appointmentStatus}`,{method:"PATCH",body:JSON.stringify({status:e.target.value})});toast("Đã cập nhật lịch hẹn");render()}catch(err){toast(err.message,"error");render()}return}
+ if(e.target.matches("[data-appointment-status]")){const select=e.target;select.disabled=true;try{await api(`/api/admin/appointments/${select.dataset.appointmentStatus}`,{method:"PATCH",body:JSON.stringify({status:select.value})});toast("Đã cập nhật lịch hẹn")}catch(err){toast(err.message,"error")}finally{await render()}return}
  if(["order-status","product-category"].includes(e.target.id))applyAdminTableFilters();
 });
 document.addEventListener("submit",async e=>{

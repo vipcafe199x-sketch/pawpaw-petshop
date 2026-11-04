@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from fastapi import HTTPException
@@ -47,8 +48,9 @@ def calculate_quote(conn, items, coupon_code=''):
     discount = 0
     if coupon_code:
         coupon = conn.execute('SELECT * FROM coupons WHERE code=? COLLATE NOCASE AND active=1', (coupon_code,)).fetchone()
-        expired = bool(coupon and coupon['expires_at'] and str(coupon['expires_at']) < date.today().isoformat())
-        if not coupon or expired or (coupon['usage_limit'] and coupon['used_count'] >= coupon['usage_limit']) or subtotal < coupon['minimum_vnd']:
+        not_started = bool(coupon and coupon['starts_at'] and str(coupon['starts_at']) > datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date().isoformat())
+        expired = bool(coupon and coupon['expires_at'] and str(coupon['expires_at']) < datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date().isoformat())
+        if not coupon or not_started or expired or (coupon['usage_limit'] and coupon['used_count'] >= coupon['usage_limit']) or subtotal < coupon['minimum_vnd']:
             raise HTTPException(422, 'Mã ưu đãi không hợp lệ hoặc chưa đủ điều kiện')
         discount = min(subtotal, subtotal * coupon['discount_value'] // 100 if coupon['discount_type'] == 'percent' else coupon['discount_value'])
     threshold = conn.execute("SELECT value FROM settings WHERE key='free_shipping_from_vnd'").fetchone()
