@@ -128,13 +128,13 @@ jobs:
           echo 'Public schema, sensitive paths, admin guard and HTTPS redirect checks passed'
           docker exec -i pawpaw python - <<'PY'
           import httpx
-          with httpx.Client(base_url='http://127.0.0.1:8000',timeout=15) as client:
+          with httpx.Client(base_url='https://pawpaw-petshop.mooo.com',timeout=15) as client:
               catalog=client.get('/api/products',params={'q':'PuppyCare'}).json()
               product=next(p for p in catalog if p['slug']=='hat-dinh-duong-puppycare')
               assert product['price_vnd']==320000
               token=client.get('/api/csrf').json()['csrfToken']
               response=client.post('/api/orders/quote',headers={'X-CSRF-Token':token},json={'items':[{'productId':product['id'],'quantity':1}],'coupon':'PAWPAW10'})
-              assert response.status_code==200
+              assert response.status_code==200, f"Read-only quote HTTP status {response.status_code}"
               quote=response.json()
               assert quote['coupon_terms']['discount_type']=='percent' and quote['coupon_terms']['discount_value']==10
               assert (quote['discount_vnd'],quote['shipping_vnd'],quote['total_vnd'])==(32000,0,288000)
