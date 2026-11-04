@@ -10,7 +10,7 @@ Production đặt `openapi_url=None`, không chỉ tắt Swagger UI. `/openapi.j
 
 ### Giới hạn đăng nhập
 
-Trước đây bộ đếm chỉ theo IP và bị xóa khi bất kỳ tài khoản nào đăng nhập thành công. Nay dùng hai bộ đếm lỗi trong 15 phút: tối đa 8 lần thất bại cho cặp IP+tài khoản và 40 lần thất bại cộng dồn theo IP. Lần vượt giới hạn trả 429 cùng Retry-After. Thành công chỉ xóa lỗi của đúng cặp IP+tài khoản; không xóa lỗi của tài khoản khác hoặc lỗi cộng dồn IP. Cache giới hạn 4096 nhóm, dùng đồng hồ monotonic và khóa đồng bộ.
+Trước đây bộ đếm chỉ theo IP và bị xóa khi bất kỳ tài khoản nào đăng nhập thành công. Nay dùng hai bộ đếm lỗi trong 15 phút: tối đa 8 lần thất bại cho cặp IP+tài khoản và 40 lần thất bại cộng dồn theo IP. Lần vượt giới hạn trả 429 cùng Retry-After. Thành công chỉ xóa lỗi của đúng cặp IP+tài khoản; không xóa lỗi của tài khoản khác hoặc lỗi cộng dồn IP. Cache giới hạn 4096 nhóm, dùng đồng hồ monotonic và khóa đồng bộ. Khóa tài khoản dùng SHA-256 kích thước cố định, không giữ email thô/chuỗi nhập dài trong bộ đếm.
 
 Giới hạn này nằm trong một process, mất khi restart, không đồng bộ giữa nhiều worker/instance và không chặn được toàn bộ tấn công phân tán. Image hiện chạy 1 worker. Khi mở rộng cần shared rate limiter/WAF. Phải cấu hình trusted proxy chính xác trước khi coi request.client.host là IP khách thật; không tin tùy ý X-Forwarded-For từ Internet. Người dùng sau cùng proxy/NAT có thể chia sẻ giới hạn IP. Không kiểm thử dò mật khẩu/khóa tài khoản thật trên production.
 
@@ -53,3 +53,9 @@ Mức đúng đã chốt là 10% và đã sửa qua admin ở v1.2.4. Khi đó k
 
 - https://fastapi.tiangolo.com/how-to/conditional-openapi/
 - https://nginx.org/en/docs/http/ngx_http_core_module.html#server_tokens
+
+## Cập nhật theo yêu cầu chỉ code và push
+
+Dừng các thao tác cấu hình coupon. Workflow bảo mật không còn kiểm tra điều kiện coupon; các bài test nghiệp vụ QA hiện có vẫn giữ nguyên. Workflow v1.2.5 chỉ cho chạy thủ công, không tự deploy khi push. Đây là workflow lịch sử ghim commit của release v1.2.5, không dùng để rollout HEAD mới hoặc chạy lại job cũ sau khi production đã thay đổi. Thay đổi code sau release cần một phiên bản triển khai mới được chọn rõ ràng.
+
+Các chỉnh sửa mới nhất ở main được kiểm thử rồi push; không chạy thêm deploy trong lượt chỉ code này. Các kết quả đã thực hiện trước đó không được trình bày thành một lượt deploy mới thành công.
