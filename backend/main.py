@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 import secrets
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+from starlette.concurrency import run_in_threadpool
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,6 +33,8 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR, check_dir=False), name="
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 LOGIN_LIMITER = FailedLoginLimiter()
+REGISTER_LIMITER = FailedLoginLimiter(window=900, account_limit=10, ip_limit=20)
+LOOKUP_LIMITER = FailedLoginLimiter(window=900, account_limit=20, ip_limit=60)
 
 
 @app.middleware("http")
@@ -128,10 +134,23 @@ def csrf(request: Request, response: Response) -> dict[str, str]:
 
 
 @app.get("/api/products")
-def products(q: str = "", category: str = "", species: str = "", sort: str = "popular", limit: int = 60) -> list[dict[str, Any]]:
+def products(q: str = "", category: str = "", species: str = "", sort: str = "popular", limit: int = 60, offset: int = 0, ids: str = "", brand: list[str] = Query(default=[]), maxPrice: int | None = None) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 100))
     sql = "SELECT * FROM products WHERE active=1 AND price_vnd>0"
     params: list[Any] = []
+    if ids:
+        parts = ids.split(',')
+        if len(parts)>100 or any(not re.fullmatch(r'[0-9]+',p) for p in parts):
+            raise HTTPException(422, 'Danh sách sản phẩm không hợp lệ')
+        sql += ' AND id IN (' + ','.join('?' for _ in parts) + ')'
+        params.extend(int(p) for p in parts)
+    if brand:
+        if len(brand)>20 or any(len(b)>100 for b in brand): raise HTTPException(422, 'Bộ lọc thương hiệu không hợp lệ')
+        sql += ' AND (' + ' OR '.join("lower(CASE WHEN brand='' THEN name ELSE brand END) LIKE ?" for _ in brand) + ')'
+        params.extend('%'+b.lower()+'%' for b in brand)
+    if maxPrice is not None:
+        if maxPrice < 0: raise HTTPException(422, 'Giá tối đa không hợp lệ')
+        sql += ' AND price_vnd<=?';params.append(maxPrice)
     if q.strip():
         sql += " AND (name LIKE ? OR description LIKE ? OR sku LIKE ? OR brand LIKE ?)"
         term = f"%{q.strip()}%"
@@ -143,8 +162,8 @@ def products(q: str = "", category: str = "", species: str = "", sort: str = "po
         sql += " AND species=?"
         params.append(species)
     order = {"price-asc": "price_vnd ASC", "price-desc": "price_vnd DESC", "newest": "id DESC", "popular": "featured DESC, id ASC"}.get(sort, "featured DESC, id ASC")
-    sql += f" ORDER BY {order} LIMIT ?"
-    params.append(limit)
+    sql += f" ORDER BY {order}, id ASC LIMIT ? OFFSET ?"
+    params.extend([limit, max(0,min(offset,10000000))])
     with connect() as conn:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
@@ -173,11 +192,17 @@ async def register(request: Request, response: Response) -> dict[str, Any]:
     name = str(body.get("fullName", "")).strip()
     phone = str(body.get("phone", "")).strip()
     password = str(body.get("password", ""))
+    ip = request.client.host if request.client else "unknown"
+    wait = REGISTER_LIMITER.retry_after(ip, "registration")
+    if wait: raise HTTPException(429, "Thử đăng ký quá nhiều lần", headers={"Retry-After":str(wait)})
+    REGISTER_LIMITER.failure(ip, "registration")
+    if len(email)>254 or len(name)>200 or len(phone)>30 or len(password)>1024: raise HTTPException(422, "Thông tin quá dài")
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(name) < 2 or len(password) < 10:
         raise HTTPException(422, "Nhập email hợp lệ, họ tên và mật khẩu tối thiểu 10 ký tự")
+    password_hash = await run_in_threadpool(hash_password, password)
     try:
         with connect() as conn:
-            cur = conn.execute("INSERT INTO users(email,full_name,phone,password_hash) VALUES(?,?,?,?)", (email, name, phone, hash_password(password)))
+            cur = conn.execute("INSERT INTO users(email,full_name,phone,password_hash) VALUES(?,?,?,?)", (email, name, phone, password_hash))
             user_id = cur.lastrowid
         issue_session(response, int(user_id))
     except Exception as exc:
@@ -193,13 +218,14 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
     body = await request.json()
     email = str(body.get("email", "")).strip().lower()
     password = str(body.get("password", ""))
+    if len(email)>254 or len(password)>1024: raise HTTPException(422, "Thông tin quá dài")
     ip = request.client.host if request.client else "unknown"
     wait = LOGIN_LIMITER.retry_after(ip,email)
     if wait:
         raise HTTPException(429, "Thử đăng nhập quá nhiều lần. Vui lòng đợi trước khi thử lại.", headers={'Retry-After':str(wait)})
     with connect() as conn:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    if not row or row["archived"] or not verify_password(password, row["password_hash"]):
+    if not row or row["archived"] or not await run_in_threadpool(verify_password, password, row["password_hash"]):
         LOGIN_LIMITER.failure(ip,email)
         raise HTTPException(401, "Email hoặc mật khẩu chưa chính xác")
     LOGIN_LIMITER.success(ip,email)
@@ -232,7 +258,18 @@ async def checkout_quote(request: Request) -> dict[str, Any]:
 @app.post("/api/orders")
 async def create_order(request: Request) -> dict[str, Any]:
     require_csrf(request)
-    return place_order(await request.json(), current_user(request))
+    return place_order(await request.json(), current_user(request), request.headers.get('idempotency-key'))
+
+
+@app.get('/api/orders/idempotency')
+def order_request_status(request: Request) -> dict[str, Any]:
+    key = request.headers.get('idempotency-key', '')
+    if not re.fullmatch(r'[0-9a-f]{48}', key): raise HTTPException(422, 'Mã yêu cầu không hợp lệ')
+    limit_order_lookup(request)
+    with connect() as conn:
+        row = conn.execute('SELECT response_json FROM order_idempotency WHERE key_hash=?', (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
+    if not row: raise HTTPException(404, 'Chưa tìm thấy yêu cầu')
+    return json.loads(row['response_json'])
 
 
 def order_view(conn: Any, row: Any) -> dict[str, Any]:
@@ -241,9 +278,17 @@ def order_view(conn: Any, row: Any) -> dict[str, Any]:
     return result
 
 
+def limit_order_lookup(request: Request) -> None:
+    ip = request.client.host if request.client else 'unknown'
+    wait = LOOKUP_LIMITER.retry_after(ip, 'lookup')
+    if wait: raise HTTPException(429, 'Tra cứu quá nhiều lần, vui lòng thử lại sau', headers={'Retry-After':str(wait)})
+    LOOKUP_LIMITER.failure(ip, 'lookup')
+
+
 @app.post("/api/orders/lookup")
 async def lookup_order(request: Request) -> dict[str, Any]:
     require_csrf(request)
+    limit_order_lookup(request)
     body = await request.json()
     code = str(body.get("code", ""))
     phone = str(body.get("phone", ""))
@@ -251,7 +296,9 @@ async def lookup_order(request: Request) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM orders WHERE order_code=? AND phone=?", (code.strip().upper(), re.sub(r"[\s.-]", "", phone))).fetchone()
         if not row:
             raise HTTPException(404, "Không tìm thấy đơn hàng với mã và số điện thoại này")
-        return order_view(conn, row)
+        order = order_view(conn, row)
+        allowed = ('order_code','status','tracking_code','created_at','subtotal_vnd','discount_vnd','shipping_vnd','total_vnd','items')
+        return {key:order[key] for key in allowed}
 
 
 @app.get("/api/account/orders")
@@ -259,6 +306,21 @@ def account_orders(user: dict[str, Any] = Depends(signed_in)) -> list[dict[str, 
     with connect() as conn:
         rows = conn.execute("SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC", (user["id"],)).fetchall()
         return [order_view(conn, r) for r in rows]
+
+
+BOOKING_SLOTS = ('08:00','09:00','10:00','11:00','13:00','14:00','15:00','16:00')
+BOOKING_STAFF = 'Chuyên viên PawPaw'
+
+
+@app.get('/api/bookings/availability')
+def booking_availability(serviceDate: str) -> dict[str, Any]:
+    try: day = date.fromisoformat(serviceDate)
+    except ValueError: raise HTTPException(422, 'Ngày hẹn chưa hợp lệ')
+    if day.isoformat() != serviceDate or day < datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date():
+        raise HTTPException(422, 'Ngày hẹn cần từ hôm nay trở đi')
+    with connect() as conn:
+        taken = {r['time_slot'] for r in conn.execute("SELECT time_slot FROM appointments WHERE service_date=? AND staff_name=? AND status!='cancelled'", (serviceDate,BOOKING_STAFF))}
+    return {'serviceDate': serviceDate, 'available': [slot for slot in BOOKING_SLOTS if slot not in taken]}
 
 
 @app.post("/api/bookings")
@@ -275,14 +337,15 @@ async def create_booking(request: Request) -> dict[str, Any]:
         appointment_day = date.fromisoformat(str(body["serviceDate"]))
     except ValueError:
         raise HTTPException(422, "Ngày hẹn chưa hợp lệ")
-    if appointment_day < date.today():
+    if appointment_day.isoformat() != str(body['serviceDate']) or appointment_day < datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date():
         raise HTTPException(422, "Ngày hẹn cần từ hôm nay trở đi")
+    if not isinstance(body['timeSlot'], str) or body['timeSlot'] not in BOOKING_SLOTS: raise HTTPException(422, 'Khung giờ không hợp lệ')
     booking_phone = re.sub(r"[\s.-]", "", str(body["phone"]))
     if not re.fullmatch(r"\+?\d{9,13}", booking_phone):
         raise HTTPException(422, "Số điện thoại chưa hợp lệ")
     price = 149000 if service_type == "grooming" else 99000
     user = current_user(request)
-    staff = "Chuyên viên PawPaw"
+    staff = BOOKING_STAFF
     try:
         with connect() as conn:
             cur = conn.execute(
@@ -300,16 +363,24 @@ async def create_booking(request: Request) -> dict[str, Any]:
 @app.post("/api/returns")
 async def request_return(request: Request) -> dict[str, Any]:
     require_csrf(request)
+    limit_order_lookup(request)
     body = await request.json()
     reason = str(body.get("reason", "")).strip()
     with connect() as conn:
-        order = conn.execute("SELECT id,created_at FROM orders WHERE order_code=? AND phone=?", (str(body.get("orderCode", "")).strip().upper(), re.sub(r"[\s.-]", "", str(body.get("phone", ""))))).fetchone()
+        order = conn.execute("SELECT id,created_at,status,delivered_at FROM orders WHERE order_code=? AND phone=?", (str(body.get("orderCode", "")).strip().upper(), re.sub(r"[\s.-]", "", str(body.get("phone", ""))))).fetchone()
         if not order:
             raise HTTPException(404, "Không tìm thấy đơn hàng")
         if not reason:
             raise HTTPException(422, "Vui lòng chọn lý do đổi trả")
+        if order['status'] != 'delivered':
+            raise HTTPException(422, 'Chỉ nhận yêu cầu đổi trả cho đơn đã giao')
+        manual_review = not order['delivered_at']
+        if not manual_review:
+            delivered_day = datetime.fromisoformat(order['delivered_at'].replace('Z','+00:00')).astimezone(ZoneInfo('Asia/Ho_Chi_Minh')).date()
+            if (datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date() - delivered_day).days > 7:
+                raise HTTPException(422, 'Đơn đã quá hạn yêu cầu đổi trả 7 ngày')
         cur = conn.execute("INSERT INTO returns(order_id,reason,details) VALUES(?,?,?)", (order["id"], reason, str(body.get("details", "")).strip()))
-        return {"id": cur.lastrowid, "status": "requested"}
+        return {"id": cur.lastrowid, "status": "requested", "manual_review": manual_review}
 
 
 @app.get("/api/faqs")
@@ -382,7 +453,7 @@ async def update_order(order_id: int, request: Request, admin: dict[str, Any] = 
                 raise HTTPException(409, "Không thể chuyển đơn sang trạng thái này")
             if status == "cancelled" and row["status"] != "cancelled":
                 restore_cancelled_stock(conn, row, admin["id"])
-            conn.execute("UPDATE orders SET status=?,tracking_code=COALESCE(NULLIF(?,''),tracking_code) WHERE id=?", (status, str(body.get("trackingCode", "")), order_id))
+            conn.execute("UPDATE orders SET status=?,tracking_code=COALESCE(NULLIF(?,''),tracking_code),delivered_at=CASE WHEN ?='delivered' AND status!='delivered' THEN ? ELSE delivered_at END WHERE id=?", (status, str(body.get("trackingCode", "")), status, datetime.now(timezone.utc).isoformat(), order_id))
             updated = order_view(conn, conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone())
             conn.execute("COMMIT")
         except Exception:
