@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from collections import defaultdict, deque
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.database import connect, init_db, db_path
+from backend.login_throttle import FailedLoginLimiter
 from backend.coupon_dates import coupon_view
 from backend.admin_domain import write_product, delete_product, promotion_values, catalog_admin, low_threshold, report_data, tier, integer, text, APPOINTMENT_TRANSITIONS
 from backend.security import csrf_matches, hash_password, new_csrf, new_session, session_digest, verify_password
@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "frontend" / "static"
 APP_ENV = os.getenv("APP_ENV", "development")
 COOKIE_SECURE = APP_ENV == "production"
-app = FastAPI(title="PawPaw Pet Shop API", version="1.0.0", docs_url="/api/docs" if APP_ENV != "production" else None, redoc_url=None)
+app = FastAPI(title="PawPaw Pet Shop API", version="1.0.0", docs_url="/api/docs" if APP_ENV != "production" else None, redoc_url=None, openapi_url="/openapi.json" if APP_ENV != "production" else None)
 UPLOAD_DIR = db_path().parent / "uploads"
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR, check_dir=False), name="uploads")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
+LOGIN_LIMITER = FailedLoginLimiter()
 
 
 @app.middleware("http")
@@ -194,18 +194,15 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
     email = str(body.get("email", "")).strip().lower()
     password = str(body.get("password", ""))
     ip = request.client.host if request.client else "unknown"
-    now = datetime.now().timestamp()
-    attempts = LOGIN_ATTEMPTS[ip]
-    while attempts and now - attempts[0] > 900:
-        attempts.popleft()
-    if len(attempts) >= 8:
-        raise HTTPException(429, "Thử đăng nhập quá nhiều lần. Vui lòng đợi 15 phút.")
+    wait = LOGIN_LIMITER.retry_after(ip,email)
+    if wait:
+        raise HTTPException(429, "Thử đăng nhập quá nhiều lần. Vui lòng đợi trước khi thử lại.", headers={'Retry-After':str(wait)})
     with connect() as conn:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     if not row or row["archived"] or not verify_password(password, row["password_hash"]):
-        attempts.append(now)
+        LOGIN_LIMITER.failure(ip,email)
         raise HTTPException(401, "Email hoặc mật khẩu chưa chính xác")
-    attempts.clear()
+    LOGIN_LIMITER.success(ip,email)
     issue_session(response, row["id"])
     return {"id": row["id"], "email": row["email"], "full_name": row["full_name"], "phone": row["phone"], "role": row["role"]}
 
@@ -323,6 +320,11 @@ def faqs() -> list[dict[str, str]]:
         {"q": "Tôi có thể đổi trả sản phẩm không?", "a": "Bạn có thể gửi yêu cầu trong 7 ngày từ khi nhận hàng nếu sản phẩm còn nguyên trạng. Đơn thức ăn đã mở có thể không đủ điều kiện đổi trả."},
         {"q": "Làm sao đặt lịch grooming hoặc khám thú y?", "a": "Mở mục Dịch vụ, chọn loại dịch vụ, thú cưng và khung giờ. PawPaw sẽ gọi xác nhận lịch."},
     ]
+
+
+@app.get('/api/admin/openapi.json',include_in_schema=False)
+def admin_openapi(admin: dict[str, Any] = Depends(admin_user)):
+    return JSONResponse(app.openapi(),headers={'Cache-Control':'no-store'})
 
 
 @app.get("/api/admin/dashboard")
@@ -621,6 +623,10 @@ def admin_search(q: str = '', admin: dict[str, Any] = Depends(admin_user)):
 @app.get("/{path:path}", include_in_schema=False)
 def web(path: str) -> FileResponse:
     # Client-side route map handles storefront and admin pages; unknown URLs land on the branded 404 view.
+    if any(part.startswith('.') for part in path.split('/')):
+        raise HTTPException(404, "Không tìm thấy đường dẫn")
+    if APP_ENV == 'production' and path.rstrip('/') in {'openapi.json','docs','redoc','api/docs','api/redoc','api/openapi.json'}:
+        raise HTTPException(404, "Không tìm thấy đường dẫn")
     if path.startswith("api/"):
         raise HTTPException(404, "API route not found")
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})

@@ -653,5 +653,145 @@ class PawPawApiTests(unittest.TestCase):
         request['coupon']=''
         self.assertIsNone(self.client.post('/api/orders/quote',headers=self.headers,json=request).json()['coupon_terms'])
 
+
+    def test_all_admin_read_and_write_routes_require_admin_role(self):
+        reads=['/api/admin/dashboard','/api/admin/orders','/api/admin/orders/1','/api/admin/products','/api/admin/inventory','/api/admin/customers','/api/admin/customers/1','/api/admin/promotions','/api/admin/appointments','/api/admin/reports','/api/admin/settings','/api/admin/search?q=QA','/api/admin/openapi.json']
+        writes=[('POST','/api/admin/products'),('PATCH','/api/admin/products/1'),('DELETE','/api/admin/products/1'),('POST','/api/admin/inventory'),('PATCH','/api/admin/orders/1'),('POST','/api/admin/promotions'),('PATCH','/api/admin/promotions/QA-MISSING'),('PATCH','/api/admin/appointments/1'),('PATCH','/api/admin/settings'),('PATCH','/api/admin/customers/1'),('POST','/api/admin/uploads')]
+        with TestClient(app) as outsider:
+            headers={'X-CSRF-Token':outsider.get('/api/csrf').json()['csrfToken']}
+            for url in reads: self.assertEqual(outsider.get(url).status_code,401,url)
+            for method,url in writes: self.assertEqual(outsider.request(method,url,headers=headers,json={}).status_code,401,url)
+            r=outsider.post('/api/auth/register',headers=headers,json={'fullName':'QA USER','email':'qa-'+secrets.token_hex(6)+'@example.invalid','password':secrets.token_urlsafe(24),'phone':'0000000000','role':'admin'})
+            self.assertEqual(r.status_code,200,r.text);self.assertEqual(r.json()['role'],'customer')
+            for url in reads: self.assertEqual(outsider.get(url).status_code,403,url)
+            for method,url in writes: self.assertEqual(outsider.request(method,url,headers=headers,json={}).status_code,403,url)
+
+    def test_all_mutation_routes_reject_missing_csrf_and_cross_origin_before_changes(self):
+        routes=[('POST','/api/auth/register'),('POST','/api/auth/login'),('POST','/api/auth/logout'),('POST','/api/orders'),('POST','/api/orders/quote'),('POST','/api/orders/lookup'),('POST','/api/bookings'),('POST','/api/returns'),('POST','/api/admin/products'),('PATCH','/api/admin/products/1'),('DELETE','/api/admin/products/1'),('POST','/api/admin/inventory'),('PATCH','/api/admin/orders/1'),('POST','/api/admin/promotions'),('PATCH','/api/admin/promotions/QA-MISSING'),('PATCH','/api/admin/appointments/1'),('PATCH','/api/admin/settings'),('PATCH','/api/admin/customers/1'),('POST','/api/admin/uploads')]
+        def snapshot():
+            with connect() as conn:
+                return {table:[tuple(r) for r in conn.execute('SELECT * FROM '+table+' ORDER BY rowid')] for table in ('users','sessions','products','orders','order_items','inventory_events','coupons','settings','appointments','returns','operational_adjustments')}
+        before=snapshot()
+        for method,url in routes:
+            response=self.client.request(method,url,json={})
+            self.assertEqual(response.status_code,403,url);self.assertEqual(response.json()['detail']['code'],'csrf_expired',url)
+            response=self.client.request(method,url,headers={**self.headers,'Origin':'https://untrusted.example.invalid'},json={})
+            self.assertEqual(response.status_code,403,url);self.assertEqual(response.json()['detail'],'Origin không hợp lệ',url)
+        self.assertEqual(snapshot(),before)
+
+    def test_account_order_list_is_owner_scoped_and_lookup_requires_matching_phone(self):
+        p=self.product();password=secrets.token_urlsafe(24);emails=['qa-'+secrets.token_hex(6)+'@example.invalid' for _ in range(2)]
+        users=[];orders=[]
+        for email in emails:
+            r=self.client.post('/api/auth/register',headers=self.headers,json={'fullName':'QA OWNER','email':email,'password':password,'phone':'0000000000'})
+            self.assertEqual(r.status_code,200);users.append(r.json()['id']);orders.append(self.order(p).json())
+        self.assertEqual([o['id'] for o in self.client.get('/api/account/orders').json()],[orders[1]['id']])
+        self.assertEqual(self.client.post('/api/auth/login',headers=self.headers,json={'email':emails[0],'password':password}).status_code,200)
+        self.assertEqual([o['id'] for o in self.client.get('/api/account/orders').json()],[orders[0]['id']])
+        self.assertEqual(self.client.get('/api/admin/orders/'+str(orders[1]['id'])).status_code,403)
+        self.assertEqual(self.client.post('/api/orders/lookup',headers=self.headers,json={'code':orders[1]['order_code'],'phone':'9999999999'}).status_code,404)
+        self.assertEqual(self.client.post('/api/returns',headers=self.headers,json={'orderCode':orders[1]['order_code'],'phone':'9999999999','reason':'QA'}).status_code,404)
+        # Public guest lookup intentionally uses code+phone, not signed-in account ownership.
+        self.assertEqual(self.client.post('/api/orders/lookup',headers=self.headers,json={'code':orders[1]['order_code'],'phone':'0000000000'}).status_code,200)
+
+    def test_price_discount_shipping_and_user_id_cannot_be_overridden_by_browser(self):
+        p=self.product();stock=self.stock(p)
+        base={'items':[{'productId':p['id'],'quantity':1,'price':1,'price_vnd':1}],'customer':{'name':'QA PRICE','phone':'0000000000','address':'QA ADDRESS'},'discount_vnd':999999,'shipping_vnd':0,'total_vnd':1,'subtotal_vnd':1,'user_id':999999}
+        quote=self.client.post('/api/orders/quote',headers=self.headers,json=base).json()
+        self.assertEqual(quote['subtotal_vnd'],p['price_vnd']);self.assertEqual(quote['discount_vnd'],0)
+        rejected=self.client.post('/api/orders',headers=self.headers,json={**base,'expectedTotalVnd':1})
+        self.assertEqual(rejected.status_code,409);self.assertEqual(self.stock(p),stock)
+        saved=self.client.post('/api/orders',headers=self.headers,json={**base,'expectedTotalVnd':quote['total_vnd']})
+        self.assertEqual(saved.status_code,200,saved.text);self.assertEqual(saved.json()['total_vnd'],quote['total_vnd'])
+        with connect() as conn:
+            self.assertNotEqual(conn.execute('SELECT user_id FROM orders WHERE id=?',(saved.json()['id'],)).fetchone()[0],999999)
+
+    def test_production_documentation_hidden_private_schema_and_cookies(self):
+        import json
+        import subprocess
+        with tempfile.TemporaryDirectory(prefix='pawpaw-prod-security-qa-') as folder:
+            env={**os.environ,'APP_ENV':'production','APP_SECRET':secrets.token_hex(32),'DATABASE_PATH':str(Path(folder)/'qa.sqlite3'),'ALLOW_DATABASE_INIT':'1'}
+            script='''
+import os
+from fastapi.testclient import TestClient
+from main import app
+with TestClient(app,base_url='https://qa.test') as client:
+    for path in ['/openapi.json','/docs','/redoc','/api/docs','/api/openapi.json','/.env','/.git/config']:
+        assert client.get(path).status_code==404,path
+    assert client.get('/api/admin/openapi.json').status_code==401
+    headers={'X-CSRF-Token':client.get('/api/csrf').json()['csrfToken']}
+    r=client.post('/api/auth/login',headers=headers,json={'email':os.environ['ADMIN_EMAIL'],'password':os.environ['ADMIN_PASSWORD']})
+    assert r.status_code==200,r.text
+    cookie=r.headers['set-cookie'].lower()
+    assert 'secure' in cookie and 'httponly' in cookie and 'samesite=lax' in cookie
+    schema=client.get('/api/admin/openapi.json')
+    assert schema.status_code==200 and schema.headers['cache-control']=='no-store'
+    assert '/api/admin/products' in schema.json()['paths']
+    assert client.get('/api/health').headers['strict-transport-security'].startswith('max-age=')
+    assert client.get('/api/health').headers['x-frame-options']=='DENY'
+print('isolated production security checks passed')
+'''
+            r=subprocess.run(['python','-c',script],env=env,capture_output=True,text=True,timeout=60)
+            self.assertEqual(r.returncode,0,r.stderr);self.assertIn('isolated production security checks passed',r.stdout)
+
+    def test_login_throttle_keeps_target_failures_after_other_account_success_and_expires(self):
+        from backend.login_throttle import FailedLoginLimiter
+        time=[0];limiter=FailedLoginLimiter(clock=lambda:time[0])
+        for _ in range(8):
+            self.assertEqual(limiter.retry_after('QA-IP','target'),0);limiter.failure('QA-IP','target');limiter.success('QA-IP','other')
+        self.assertEqual(limiter.retry_after('QA-IP','target'),900)
+        self.assertEqual(limiter.retry_after('QA-IP','other'),0)
+        for i in range(32): limiter.failure('QA-IP','QA-'+str(i))
+        self.assertEqual(limiter.retry_after('QA-IP','new-account'),900)
+        limiter.success('QA-IP','target');self.assertEqual(limiter.retry_after('QA-IP','new-account'),900)
+        time[0]=901;self.assertEqual(limiter.retry_after('QA-IP','target'),0)
+        small=FailedLoginLimiter(capacity=4)
+        for i in range(20): small.failure('QA-IP-'+str(i),'QA')
+        self.assertLessEqual(len(small.buckets),4)
+
+    def test_login_endpoint_rate_limit_and_retry_after_in_isolated_limiter(self):
+        from unittest.mock import patch
+        from backend.login_throttle import FailedLoginLimiter
+        with patch('backend.main.LOGIN_LIMITER',FailedLoginLimiter()):
+            for _ in range(8):
+                self.assertEqual(self.client.post('/api/auth/login',headers=self.headers,json={'email':'qa-unknown@example.invalid','password':'QA INVALID'}).status_code,401)
+            response=self.client.post('/api/auth/login',headers=self.headers,json={'email':'qa-unknown@example.invalid','password':'QA INVALID'})
+            self.assertEqual(response.status_code,429);self.assertGreater(int(response.headers['retry-after']),0)
+            self.login(self.client,self.headers)
+            self.assertEqual(self.client.post('/api/auth/login',headers=self.headers,json={'email':'qa-unknown@example.invalid','password':'QA INVALID'}).status_code,429)
+
+    def test_backup_can_be_restored_into_separate_qa_database(self):
+        import sqlite3
+        p=self.product();order=self.order(p).json()
+        with tempfile.TemporaryDirectory(prefix='pawpaw-restore-qa-') as folder:
+            backup=Path(folder)/'backup.sqlite3';restored=Path(folder)/'restored.sqlite3'
+            with connect() as source,sqlite3.connect(backup) as target: source.backup(target)
+            with sqlite3.connect(backup) as source,sqlite3.connect(restored) as target: source.backup(target)
+            with sqlite3.connect(restored) as conn:
+                self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+                self.assertEqual(conn.execute('SELECT stock FROM products WHERE id=?',(p['id'],)).fetchone()[0],p['stock']-1)
+                self.assertEqual(conn.execute('SELECT total_vnd FROM orders WHERE id=?',(order['id'],)).fetchone()[0],order['total_vnd'])
+
+    def test_nginx_snippet_validation_rollback_and_unmanaged_file_protection(self):
+        import importlib.util
+        import subprocess
+        from unittest.mock import patch
+        spec=importlib.util.spec_from_file_location('qa_nginx',Path(__file__).resolve().parent.parent/'deploy/nginx/harden_server_tokens.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix='pawpaw-nginx-qa-') as folder:
+            path=Path(folder)/'pawpaw-security.conf'
+            with patch.object(module.subprocess,'run',return_value=None):
+                self.assertTrue(module.harden(folder));self.assertEqual(path.read_bytes(),module.CONTENT)
+                self.assertFalse(module.harden(folder))
+            path.unlink()
+            with patch.object(module.subprocess,'run',side_effect=[None,subprocess.CalledProcessError(1,['nginx','-t']),None,None]):
+                with self.assertRaises(RuntimeError): module.harden(folder)
+            self.assertFalse(path.exists())
+            path.write_text('QA UNMANAGED CONFIG')
+            with patch.object(module.subprocess,'run') as run:
+                with self.assertRaises(RuntimeError): module.harden(folder)
+                run.assert_not_called()
+            self.assertEqual(path.read_text(),'QA UNMANAGED CONFIG')
+
 if __name__ == '__main__':
     unittest.main()

@@ -80,3 +80,7 @@ Xem [phạm vi, cách sử dụng, kiểm thử và dọn dữ liệu test an to
 ## v1.2.4 giỏ hàng và bộ lọc
 
 [Đối chiếu PAWPAW10 10%, điều kiện lấy từ báo giá server và đếm đúng sản phẩm sau lọc](docs/followup-v1.2.4.md).
+
+## v1.2.5 bảo mật
+
+[Phạm vi gia cố và các giới hạn bảo mật chưa giải quyết](docs/security-v1.2.5.md): schema chỉ cho admin ở production, chặn đường dotfile, gia cố rate limit, cấu hình ẩn phiên bản server và test quyền/CSRF/giá/khôi phục QA. Không đồng nghĩa đã kiểm thử xâm nhập toàn diện; MFA, guest lookup và hạ tầng vẫn cần đánh giá trước vận hành thật.
